@@ -1,0 +1,5 @@
+.venv/*
+*.csv
+.DS_Store
+*.RData
+*.Rhistory

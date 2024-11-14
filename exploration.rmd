@@ -1,0 +1,145 @@
+```{r}
+library(readr)
+library(dplyr)
+library(lfe)
+library(stargazer)
+library(jsonlite)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+stage_df <- read_csv("results_df_2021_2023.csv") %>%
+  filter(
+    !is.na(team_name),
+    uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
+    #is_one_day_race, # For now - stage races more complex
+    #stage_type == "RR",
+    # status == "DF"
+  ) %>%
+  mutate(
+    total_uci_points = uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)
+  )
+
+url_lookup = read_csv("url_lookup_2021_2023.csv")
+  
+crash_df = read_csv("crash_df_2021_2023.csv") %>%
+  mutate(riders = map(riders, ~ {
+    # Step 2: Remove brackets but preserve content inside
+    list_string <- str_remove_all(.x, "\\[|\\]")
+    
+    # Step 3: Split by ', ' while preserving apostrophes inside names
+    str_split(list_string, "', '", simplify = TRUE) %>%
+      str_remove_all("'")  # Remove remaining single quotes
+  })) %>%
+  unnest(riders) %>%
+  rename(stage_url_2 = stage_url) %>%
+  merge(url_lookup,by="stage_url_2") %>%
+  select(-stage_url_2) %>%
+  rename(rider_name = riders)
+```
+
+Are crashes more likely reported for high profile riders? Although biased as crashing will reduce total points...
+```{r}
+rider_year_points = stage_df %>%
+  group_by(rider_name) %>%
+  summarize(total_points = sum(total_uci_points),
+            total_stages = n())
+
+crash_df %>%
+  group_by(rider_name) %>%
+  summarize(crashes = n()) %>%
+  merge(rider_year_points, by = "rider_name", all.y = TRUE) %>%
+  mutate(crashes = coalesce(crashes, 0),
+         crashes_per_stage = crashes/total_stages) %>%
+  ggplot(aes(x = total_points, y = crashes_per_stage)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") # Adds a linear trendline
+```
+
+What about high profile races?
+```{r}
+race_points = stage_df %>%
+  group_by(stage_url) %>%
+  summarize(total_points = sum(total_uci_points))
+
+crash_df %>%
+  group_by(stage_url) %>%
+  summarize(crashes = n()) %>%
+  merge(race_points,by="stage_url",all.y=T) %>%
+  mutate(crashes = coalesce(crashes,0)) %>%
+  ggplot(aes(x=total_points,y=crashes)) + geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") # Adds a linear trendline
+```
+
+Get the UCI points given out per rider for each race, filtered:
+* One day road races (for now, as tours would require to also count following stages as DNFs)
+* World or pro tour
+* Finishes
+```{r}
+stage_df %>%
+  filter(
+    !is.na(team_name),
+    uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
+    # is_one_day_race,
+    # stage_type == "RR",
+    status == "DF"
+  ) %>%
+  summarize(
+    uci_points_2 = sum(uci_points) + sum(gc_uci_points,na.rm=T) + sum(points_uci_points,na.rm=T) + sum(kom_uci_points,na.rm=T) + sum(youth_uci_points,na.rm=T),
+    uci_points_per_finish = sum(uci_points_2)/n(),
+    gc_points = sum(gc_uci_points,na.rm=T)
+  )
+```
+
+```{r}
+stage_df %>% 
+  mutate(
+    total_uci_points = uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)
+  ) %>%
+  arrange(desc(uci_points_2)) %>% select(stage_url,uci_points_2)
+```
+
+Get crash DNFs
+```{r}
+crash_df_temp = crash_df %>%
+  group_by(rider_name,stage_url) %>%
+  summarize() %>%
+  mutate(crash = T)
+  
+team_race_df = stage_df %>%
+  merge(crash_df_temp,by=c("stage_url","rider_name"),all.x=T) %>%
+  mutate(crash_dnf = case_when(crash & status == "DNF"~T,T~F)) %>%
+  group_by(team_name, stage_url, race_name, date) %>%
+  summarize(
+    dnfs = sum(crash_dnf),
+    uci_points = sum(uci_points)
+  ) 
+
+team_race_df %>%
+  felm(uci_points ~ dnfs | race_name + team_name,data=.) %>%
+  stargazer(type='text')
+```
+
+Get the loss in UCI points per DNF
+```{r}
+pcs_2023_df %>%
+  filter(
+    !is.na(team_name),
+    uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
+    # is_one_day_race,
+    stage_type == "RR"
+  ) %>%
+  group_by(team_name, stage_url, race_name, date) %>%
+  summarize(
+    dnfs = sum(status == "DNF"),
+    uci_points = sum(uci_points)
+  ) %>%
+  felm(uci_points ~ dnfs | race_name + team_name,data=.) %>%
+  stargazer(type='text')
+```
+
+
+
