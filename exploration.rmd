@@ -8,6 +8,7 @@ library(tidyr)
 library(stringr)
 library(purrr)
 library(ggplot2)
+library(lubridate)
 ```
 
 ```{r}
@@ -73,7 +74,6 @@ crash_df %>%
   ggplot(aes(x=total_points,y=crashes)) + geom_point() +
   geom_smooth(method = "lm", se = TRUE, color = "blue") # Adds a linear trendline
 ```
-
 Get the UCI points given out per rider for each race, filtered:
 * One day road races (for now, as tours would require to also count following stages as DNFs)
 * World or pro tour
@@ -142,4 +142,106 @@ pcs_2023_df %>%
 ```
 
 
+Create clean df for the regressions:
+- team-race level
+-- including stage races summed up
+vars:
+- one day race
+- elevation/distance
+- crash dnfs
+- % of race missed by crash dnfs
+- total uci points
+- # riders finished
+- total race points
 
+Plus: extra reg vars
+
+```{r}
+crash_df_temp = crash_df %>%
+  group_by(rider_name,stage_url) %>%
+  summarize(last_crash_kms = max(km_to_go)) %>%
+  mutate(crash = T)
+
+race_temp_df = stage_df %>%
+  mutate(vm_per_km = vertical_meters/distance,
+         race_year = year(date)) %>%
+  group_by(stage_url, race_name, race_year, vertical_meters, distance) %>%
+  summarize() %>%
+  group_by(race_name,race_year) %>%
+  summarize(
+    vm_per_km = sum(vertical_meters)/sum(distance)
+  )
+
+rider_year_temp_df = stage_df %>%
+  mutate(race_year = year(date)) %>%
+  filter(!is.na(race_year)) %>%
+  group_by(rider_name,race_year) %>%
+  summarize(
+    rider_ppr = sum(uci_points)/n()
+  )
+
+reg_df = stage_df %>%
+  mutate(race_year = year(date)) %>%
+  merge(crash_df_temp,by=c("stage_url","rider_name"),all.x=T) %>%
+  merge(rider_year_temp_df,by=c("rider_name","race_year"),all.x=T) %>%
+  mutate(crash_dnf = case_when(crash & status == "DNF"~T,T~F),
+         crash_dnf_pct_missed = case_when(crash & status == "DNF"~coalesce(last_crash_kms*1.00/distance,0.5),T~0),
+         stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+"))) %>%
+  merge(race_temp_df,by=c('race_name','race_year')) %>%
+  group_by(team_name, race_name, race_year,vm_per_km) %>%
+  summarize(
+    dnfs = sum(crash_dnf),
+    uci_points = sum(uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)),
+    is_one_day_race = max(is_one_day_race),
+    pct_missed_by_crash_dnfs = case_when(
+      max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed),
+      T ~ sum((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))
+    ),
+    lost_rider_ppr_weighted = case_when(
+      max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed*rider_ppr)/sum(crash_dnf_pct_missed),
+      T ~ sum(((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))*rider_ppr)/sum((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))
+    ),
+    max_stage = max(stage_number),
+    riders_finished = sum(coalesce(stage_number,-1) == coalesce(max_stage,-1) & status == "DF")
+  ) %>%
+  group_by(race_name,race_year) %>%
+  mutate(
+    ppr = uci_points/riders_finished,
+    tp = sum(uci_points),
+    tppr = sum(uci_points)/sum(riders_finished),
+    ppr_over_tppr = ppr/tppr
+  ) %>%
+  ungroup() %>%
+  group_by(team_name,race_year) %>%
+  mutate(
+    team_tp = sum(uci_points)
+  )
+```
+
+How 
+```{r}
+reg_df %>%
+  filter(!is.na(ppr_over_tppr),
+         is.finite(ppr_over_tppr),
+         !is.na(dnfs)) %>%
+  felm(ppr_over_tppr ~ dnfs | tp ,data=.) %>%
+  stargazer(type='text')
+```
+
+```{r}
+reg_df %>%
+  filter(!is.na(ppr_over_tppr),
+         is.finite(ppr_over_tppr),
+         !is.na(dnfs)) %>%
+  felm(ppr_over_tppr ~ pct_missed_by_crash_dnfs + tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
+  stargazer(type='text')
+```
+
+```{r}
+reg_df %>%
+  filter(!is.na(ppr_over_tppr),
+         is.finite(ppr_over_tppr),
+         !is.na(dnfs)) %>%
+  felm(uci_points ~ pct_missed_by_crash_dnfs*tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
+  stargazer(type='text')
+```
