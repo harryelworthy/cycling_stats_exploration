@@ -9,6 +9,8 @@ library(stringr)
 library(purrr)
 library(ggplot2)
 library(lubridate)
+
+# install.packages("tidyr","ggplot2","lubridate","stargazer")
 ```
 
 ```{r}
@@ -184,22 +186,24 @@ reg_df = stage_df %>%
   mutate(race_year = year(date)) %>%
   merge(crash_df_temp,by=c("stage_url","rider_name"),all.x=T) %>%
   merge(rider_year_temp_df,by=c("rider_name","race_year"),all.x=T) %>%
-  mutate(crash_dnf = case_when(crash & status == "DNF"~T,T~F),
+  mutate(dnf_or_dns = status %in% c("DNF","DNS"),
+         crash_dnf = case_when(crash & status == "DNF"~T,T~F),
          crash_dnf_pct_missed = case_when(crash & status == "DNF"~coalesce(last_crash_kms*1.00/distance,0.5),T~0),
          stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+"))) %>%
   merge(race_temp_df,by=c('race_name','race_year')) %>%
   group_by(team_name, race_name, race_year,vm_per_km) %>%
   summarize(
-    dnfs = sum(crash_dnf),
+    crash_dnfs = sum(crash_dnf),
     uci_points = sum(uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)),
     is_one_day_race = max(is_one_day_race),
+    pct_missed_by_dnfs_or_dns_stage_race = sum((max(stage_number) - ifelse(dnf_or_dns,stage_number,max(stage_number)))/max(stage_number)),
     pct_missed_by_crash_dnfs = case_when(
       max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed),
-      T ~ sum((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))
+      T ~ sum((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))
     ),
     lost_rider_ppr_weighted = case_when(
       max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed*rider_ppr)/sum(crash_dnf_pct_missed),
-      T ~ sum(((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))*rider_ppr)/sum((max(stage_number) - ifelse(crash_dnf,stage_number,0))/max(stage_number))
+      T ~ sum(((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))*rider_ppr)/sum((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))
     ),
     max_stage = max(stage_number),
     riders_finished = sum(coalesce(stage_number,-1) == coalesce(max_stage,-1) & status == "DF")
@@ -218,13 +222,16 @@ reg_df = stage_df %>%
   )
 ```
 
-How 
+How did the team's points per finishing rider differ when a rider crashed out?
+# NB RERUN THIS - FIXED PCT MISSING 
+# AND WRONG FIXED EFFECTS
+# TODO TURN THIS INTO A LEGIBLE STARGAZER MULTI TABLE
 ```{r}
 reg_df %>%
   filter(!is.na(ppr_over_tppr),
          is.finite(ppr_over_tppr),
-         !is.na(dnfs)) %>%
-  felm(ppr_over_tppr ~ dnfs | tp ,data=.) %>%
+         !is.na(crash_dnfs)) %>%
+  felm(ppr_over_tppr ~ crash_dnfs + tp,data=.) %>% 
   stargazer(type='text')
 ```
 
@@ -232,7 +239,7 @@ reg_df %>%
 reg_df %>%
   filter(!is.na(ppr_over_tppr),
          is.finite(ppr_over_tppr),
-         !is.na(dnfs)) %>%
+         !is.na(crash_dnfs)) %>%
   felm(ppr_over_tppr ~ pct_missed_by_crash_dnfs + tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
   stargazer(type='text')
 ```
@@ -241,7 +248,144 @@ reg_df %>%
 reg_df %>%
   filter(!is.na(ppr_over_tppr),
          is.finite(ppr_over_tppr),
-         !is.na(dnfs)) %>%
+         !is.na(crash_dnfs)) %>%
   felm(uci_points ~ pct_missed_by_crash_dnfs*tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
   stargazer(type='text')
 ```
+
+This seems to be quite unstable depending on the functional form we choose. To fix this I propose:
+* Focus on stage races where riders crash out early in the race - so teams were missing them for a lot of the race. One-day crashes are pretty tough to reason about - high likelihood they impact other riders (although this would bias in the wrong direction)
+** Although we should already mostly be capturing this by focusing on pct_missed
+* Use all DNFs, not just crashes. Or could look also at times where riders crashed and DNSed the next day. But I think pretty fair to assume early dropouts are not planned
+
+How did the team's points per finishing rider differ when riders abandoned early in a stage race? VS no abandons
+```{r}
+reg_df %>%
+  filter(!is.na(ppr_over_tppr),
+         is.finite(ppr_over_tppr),
+         !is.na(crash_dnfs)) %>% # Do I need these?
+  filter(
+    !is_one_day_race
+  ) %>%
+  felm(ppr_over_tppr ~ pct_missed_by_dnfs_or_dns_stage_race,data=.) %>%
+  stargazer(type='text')
+```
+
+Maybe better is if we look at teams that had abandons near the middle of the race and look at how they did before/after. To do this:
+* Build a virtual points stat: if the race ended now, what would that riders' points be? Adjust stage points to reflect how much of the race has happened
+* Filter for races where riders abandoned all on one day (for clear effects)
+* get all non-abandoning riders and sum their virtual points for each stage since crash along with actual points at the end
+* Event study
+
+Also can just filter to times where this happened near the middle and check points before/points after
+* Also maybe points from the day after, in case the DNF itself caused issues
+
+Can also just look at GC placings + stage wins/points. Will start with that
+
+```{r}
+pre_post_df = stage_df %>%
+  mutate(stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+")), # Should shift to start
+         race_year = year(date)) %>% 
+  filter(!is_one_day_race) %>%
+  group_by(race_name,race_year,rider_name) %>%
+  arrange(date) %>%
+  mutate(
+    cumulative_stage_points = cumsum(uci_points),
+    cumulative_wins = cumsum(ifelse(rank == 1, 1, 0)),
+    abandon_stage = max(ifelse(status %in% c("DNF","DNS"),stage_number,0),na.rm=T),
+    abandon_stage = ifelse(abandon_stage == 0, NA_integer_,abandon_stage)
+  ) %>%
+  ungroup() %>%
+  group_by(race_name,race_year,team_name) %>%
+  mutate(distinct_team_abandon_stages = n_distinct(abandon_stage,na.rm = T)) %>%
+  filter(distinct_team_abandon_stages == 1) %>% # All dropped on one day - should check how this affects selection. Could expand window or drop criteria
+  mutate(team_abandon_stage = max(abandon_stage,na.rm=T),
+         stages_since_team_abandon_stage = stage_number - team_abandon_stage) %>%
+  filter(is.na(abandon_stage)) %>% # Drop the abandoning riders from the analysis
+  ungroup() %>%
+  group_by(race_name,race_year) %>%
+  mutate(total_stage_points = sum(uci_points)) %>%
+  ungroup() %>%
+  group_by(race_name,race_year,stage_number,stages_since_team_abandon_stage, team_name, team_abandon_stage) %>%
+  summarize(
+    best_placed_gc = min(rank,na.rm=T),
+    avg_gc_place = mean(rank,na.rm=T),
+    stage_uci_points_pct_of_available = sum(cumulative_stage_points,na.rm=T)/max(total_stage_points,na.rm=T),
+    stage_wins_per_stage = sum(cumulative_wins,na.rm=T)/max(stage_number)
+  )
+```
+
+```{r}
+pre_post_df %>%
+  filter(!is.nan(stage_uci_points_pct_of_available)) %>%
+  group_by(race_name,race_year) %>%
+  mutate(last_stage = max(stage_number)) %>%
+  # filter for middle third dropouts
+  filter(team_abandon_stage > last_stage/3,
+         team_abandon_stage <= last_stage*2/3) %>%
+  # filter for either the stage before dropouts or the final stage
+  filter(stage_number == team_abandon_stage - 1 | stage_number == last_stage) %>%
+  mutate(stage = ifelse(stage_number == last_stage,"last","last pre-abandon")) %>%
+  group_by(stage) %>%
+  summarize(
+    avg_best_placed_gc = mean(best_placed_gc),
+    avg_avg_gc_place = mean(avg_gc_place),
+    avg_stage_uci_points_pct_of_available = mean(stage_uci_points_pct_of_available),
+    avg_stage_wins_per_stage = mean(stage_wins_per_stage)
+  )
+```
+
+# Break teammates
+* Filter for breakaway wins
+* Did people with teammates do better?
+
+We'd expect this would show positive even with no teammate effect. A team's second best rider is a signal of the quality of their first best rider (mathematically, but also teams in cycling have very different budgets and correspondingly different average rider qualitites). So a team with 2 riders in a break is more likely to have a stronger 1st rider than a team with 1 rider. There's also interfering effects here. For example, in a stage race, worse teams may be more keen to get riders in breakaways while better teams save riders' energy or keep them back to (hypothetically) help keep their leaders out of trouble.
+
+However it's still worth seeing if we can find any useful signal.
+
+```{r}
+gap_length_seconds = 30
+max_break_size = 15
+
+first_gaps = stage_df %>%
+  # Find first gap bigger than X seconds
+  arrange(race_url, rank) %>%
+  mutate(time_gap = lead(finish_time) - finish_time) %>%
+  filter(time_gap > gap_length_seconds) %>%
+  summarize(first_rank_with_gap = min(rank))
+
+stage_df %>%
+  merge(first_gaps, by="race_url",all.x=T) %>%
+  mutate(stage_profile = NA) %>% # fill out - we want to break out by flat, hilly, mountains. and maybe by finish profile if poss
+  # Only the break in valid stages
+  filter(first_rank_with_gap <= max_break_size,
+         rank <= first_rank_with_gap) %>%
+  group_by(race_name,stage_profile,team_name) %>%
+  summarize(teammates_in_first_break = n(),
+            best_placed_in_team = min(rank)) %>%
+  group_by(race_url) %>%
+  mutate(break_size = sum(teammates_in_first_break)) %>%
+  # Controlling for break size as larger break means more likely to have teammates and also lower average best placed. Maybe this is not the best way to do it though? Too tired to think
+  # Best placed in team has a nonlinear relationship with break size?
+  lm(best_placed_in_team ~ teammates_in_first_break + break_size + stage_profile) %>%
+  summary()
+```
+
+General hypotheses:
+
+* Trains to keep riders at the front do basically nothing, either for GC or sprints
+* Mountain domestiques to very little, especially for underdogs
+* Attacking in turns is more effective relative to leadouts
+* One good leadout man is better than a team of middling leadout men
+* Breakaways are relatively underused. EG tim declerq should be going for breaks more often
+
+Talk about pidcock/rodriguez in tour doc. These are oversensationalized but they often contain some truth, like pidcock actually beefing with management. What benefit could he have possibly given carlos??
+
+How can riders use game theory more effectively?
+
+https://www.youtube.com/watch?v=SQ01eBEJ1Tk - 104:30 on unlocking riders
+
+* Fakes:
+  * Riders should want opposing riders to not know when they will attack. One way: launch fake attacks, or ride so that lead up to an attack looks just like normal riding
+  * Or: some portion of attacks should fizzle early. That way teams will not chase so hard
+* 
