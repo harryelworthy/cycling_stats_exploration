@@ -15,6 +15,7 @@ library(lubridate)
 
 ```{r}
 stage_df <- read_csv("results_df_2021_2023.csv") %>%
+  #bind_rows(read_csv("results_df_2018_2020.csv")) %>%
   filter(
     !is.na(team_name),
     uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
@@ -292,7 +293,7 @@ pre_post_df = stage_df %>%
   mutate(
     cumulative_stage_points = cumsum(uci_points),
     cumulative_wins = cumsum(ifelse(rank == 1, 1, 0)),
-    abandon_stage = max(ifelse(status %in% c("DNF","DNS"),stage_number,0),na.rm=T),
+    abandon_stage = max(ifelse(status != c("DF"),stage_number,0),na.rm=T),
     abandon_stage = ifelse(abandon_stage == 0, NA_integer_,abandon_stage)
   ) %>%
   ungroup() %>%
@@ -348,28 +349,34 @@ gap_length_seconds = 30
 max_break_size = 15
 
 first_gaps = stage_df %>%
+  mutate(time = hms(time)) %>%
   # Find first gap bigger than X seconds
-  arrange(race_url, rank) %>%
-  mutate(time_gap = lead(finish_time) - finish_time) %>%
+  group_by(stage_url) %>%
+  mutate(time_gap = lead(time,order_by=rank) - time) %>%
   filter(time_gap > gap_length_seconds) %>%
   summarize(first_rank_with_gap = min(rank))
 
 stage_df %>%
-  merge(first_gaps, by="race_url",all.x=T) %>%
-  mutate(stage_profile = NA) %>% # fill out - we want to break out by flat, hilly, mountains. and maybe by finish profile if poss
+  merge(first_gaps, by="stage_url",all.x=T) %>%
+  # mutate(stage_profile = NA) %>% # fill out - we want to break out by flat, hilly, mountains. and maybe by finish profile if poss
   # Only the break in valid stages
   filter(first_rank_with_gap <= max_break_size,
          rank <= first_rank_with_gap) %>%
-  group_by(race_name,stage_profile,team_name) %>%
+  group_by(stage_url,team_name) %>%
   summarize(teammates_in_first_break = n(),
-            best_placed_in_team = min(rank)) %>%
-  group_by(race_url) %>%
+            best_placed_in_team = min(rank),
+            avg_placed_in_team = mean(rank)) %>%
+  group_by(stage_url) %>%
   mutate(break_size = sum(teammates_in_first_break)) %>%
   # Controlling for break size as larger break means more likely to have teammates and also lower average best placed. Maybe this is not the best way to do it though? Too tired to think
   # Best placed in team has a nonlinear relationship with break size?
-  lm(best_placed_in_team ~ teammates_in_first_break + break_size + stage_profile) %>%
+  lm(avg_placed_in_team ~ teammates_in_first_break + break_size,data=.)
+
+%>%
   summary()
 ```
+
+Can placebo here. What is the lift if given a random teammate?
 
 General hypotheses:
 
