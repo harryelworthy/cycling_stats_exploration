@@ -9,13 +9,15 @@ library(stringr)
 library(purrr)
 library(ggplot2)
 library(lubridate)
+library(data.table)
 
 # install.packages("tidyr","ggplot2","lubridate","stargazer")
 ```
 
 ```{r}
 stage_df <- read_csv("results_df_2021_2023.csv") %>%
-  #bind_rows(read_csv("results_df_2018_2020.csv")) %>%
+  mutate(time = hms(time)) %>%
+  bind_rows(read_csv("results_df_2018_2020.csv")%>%mutate(time = hms(time))) %>%
   filter(
     !is.na(team_name),
     uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
@@ -24,255 +26,112 @@ stage_df <- read_csv("results_df_2021_2023.csv") %>%
     # status == "DF"
   ) %>%
   mutate(
-    total_uci_points = uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)
-  )
-
-url_lookup = read_csv("url_lookup_2021_2023.csv")
-  
-crash_df = read_csv("crash_df_2021_2023.csv") %>%
-  mutate(riders = map(riders, ~ {
-    # Step 2: Remove brackets but preserve content inside
-    list_string <- str_remove_all(.x, "\\[|\\]")
-    
-    # Step 3: Split by ', ' while preserving apostrophes inside names
-    str_split(list_string, "', '", simplify = TRUE) %>%
-      str_remove_all("'")  # Remove remaining single quotes
-  })) %>%
-  unnest(riders) %>%
-  rename(stage_url_2 = stage_url) %>%
-  merge(url_lookup,by="stage_url_2") %>%
-  select(-stage_url_2) %>%
-  rename(rider_name = riders)
-```
-
-Are crashes more likely reported for high profile riders? Although biased as crashing will reduce total points...
-```{r}
-rider_year_points = stage_df %>%
-  group_by(rider_name) %>%
-  summarize(total_points = sum(total_uci_points),
-            total_stages = n())
-
-crash_df %>%
-  group_by(rider_name) %>%
-  summarize(crashes = n()) %>%
-  merge(rider_year_points, by = "rider_name", all.y = TRUE) %>%
-  mutate(crashes = coalesce(crashes, 0),
-         crashes_per_stage = crashes/total_stages) %>%
-  ggplot(aes(x = total_points, y = crashes_per_stage)) +
-  geom_point() +
-  geom_smooth(method = "lm", se = TRUE, color = "blue") # Adds a linear trendline
-```
-
-What about high profile races?
-```{r}
-race_points = stage_df %>%
-  group_by(stage_url) %>%
-  summarize(total_points = sum(total_uci_points))
-
-crash_df %>%
-  group_by(stage_url) %>%
-  summarize(crashes = n()) %>%
-  merge(race_points,by="stage_url",all.y=T) %>%
-  mutate(crashes = coalesce(crashes,0)) %>%
-  ggplot(aes(x=total_points,y=crashes)) + geom_point() +
-  geom_smooth(method = "lm", se = TRUE, color = "blue") # Adds a linear trendline
-```
-Get the UCI points given out per rider for each race, filtered:
-* One day road races (for now, as tours would require to also count following stages as DNFs)
-* World or pro tour
-* Finishes
-```{r}
-stage_df %>%
-  filter(
-    !is.na(team_name),
-    uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
-    # is_one_day_race,
-    # stage_type == "RR",
-    status == "DF"
+    total_uci_points = uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0),
+    race_year = year(date), # assuming no races over new years
+    vm_per_km = vertical_meters/distance, # for potential profile grouping
+    abandon = status != "DF",
+    stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+"))
   ) %>%
-  summarize(
-    uci_points_2 = sum(uci_points) + sum(gc_uci_points,na.rm=T) + sum(points_uci_points,na.rm=T) + sum(kom_uci_points,na.rm=T) + sum(youth_uci_points,na.rm=T),
-    uci_points_per_finish = sum(uci_points_2)/n(),
-    gc_points = sum(gc_uci_points,na.rm=T)
-  )
+  group_by(race_name,race_year) %>%
+  mutate(race_date = min(date))
+
+
+# Create a list of unique race dates
+unique_dates <- unique(stage_df$race_date)
+
+# code for the same for riders is in old.rmd
+
+stage_df <- unique_dates %>%
+  map(~{
+    stage_df %>%
+      filter(race_date == .x) %>%  # Focus on the current race date
+      left_join(
+        stage_df %>%
+          filter(
+            race_date < .x & race_date >= (.x %m-% months(12)) # Within the last 12 months
+          ) %>%
+          group_by(team_name) %>%
+          summarize(team_points_l12m = sum(total_uci_points, na.rm = TRUE), .groups = "drop"),
+        by = "team_name"
+      ) %>%
+      mutate(period = .x)  # Add a column for the current race date
+  }) %>%
+  bind_rows()
 ```
 
-```{r}
-stage_df %>% 
-  mutate(
-    total_uci_points = uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)
-  ) %>%
-  arrange(desc(uci_points_2)) %>% select(stage_url,uci_points_2)
-```
-
-Get crash DNFs
-```{r}
-crash_df_temp = crash_df %>%
-  group_by(rider_name,stage_url) %>%
-  summarize() %>%
-  mutate(crash = T)
-  
-team_race_df = stage_df %>%
-  merge(crash_df_temp,by=c("stage_url","rider_name"),all.x=T) %>%
-  mutate(crash_dnf = case_when(crash & status == "DNF"~T,T~F)) %>%
-  group_by(team_name, stage_url, race_name, date) %>%
-  summarize(
-    dnfs = sum(crash_dnf),
-    uci_points = sum(uci_points)
-  ) 
-
-team_race_df %>%
-  felm(uci_points ~ dnfs | race_name + team_name,data=.) %>%
-  stargazer(type='text')
-```
-
-Get the loss in UCI points per DNF
-```{r}
-pcs_2023_df %>%
-  filter(
-    !is.na(team_name),
-    uci_tour %in% c("UCI Worldtour","UCI ProSeries"),
-    # is_one_day_race,
-    stage_type == "RR"
-  ) %>%
-  group_by(team_name, stage_url, race_name, date) %>%
-  summarize(
-    dnfs = sum(status == "DNF"),
-    uci_points = sum(uci_points)
-  ) %>%
-  felm(uci_points ~ dnfs | race_name + team_name,data=.) %>%
-  stargazer(type='text')
-```
-
-
-Create clean df for the regressions:
-- team-race level
--- including stage races summed up
+I want to examine stage race results, comparing teams that lost riders vs. those that didn't. ODR crashes are too likely to impact teammates outside of the rider abandoning.
+- team-race level for only stage race
 vars:
-- one day race
-- elevation/distance
-- crash dnfs
-- % of race missed by crash dnfs
-- total uci points
-- # riders finished
-- total race points
-
-Plus: extra reg vars
+- abandons
+- % of race missed by abandons - 1 would mean the equivalent of 1 rider missing for the whole race. So this can go higher than 1
+- extra reg vars -- team_ppr etc
 
 ```{r}
-crash_df_temp = crash_df %>%
-  group_by(rider_name,stage_url) %>%
-  summarize(last_crash_kms = max(km_to_go)) %>%
-  mutate(crash = T)
+# Create a list of unique race dates
+unique_dates <- unique(stage_df$race_date)
 
-race_temp_df = stage_df %>%
-  mutate(vm_per_km = vertical_meters/distance,
-         race_year = year(date)) %>%
-  group_by(stage_url, race_name, race_year, vertical_meters, distance) %>%
-  summarize() %>%
-  group_by(race_name,race_year) %>%
-  summarize(
-    vm_per_km = sum(vertical_meters)/sum(distance)
-  )
+# code for the same for riders is in old.rmd
 
-rider_year_temp_df = stage_df %>%
-  mutate(race_year = year(date)) %>%
-  filter(!is.na(race_year)) %>%
-  group_by(rider_name,race_year) %>%
+stage_race_reg_df <- unique_dates %>%
+  map(~{
+    stage_df %>%
+      filter(race_date == .x) %>%  # Focus on the current race date
+      left_join(
+        stage_df %>%
+          filter(
+            race_date < .x & race_date >= (.x %m-% months(12)) # Within the last 12 months
+          ) %>%
+          group_by(team_name) %>%
+          summarize(team_points_l12m = sum(total_uci_points, na.rm = TRUE), .groups = "drop"),
+        by = "team_name"
+      ) %>%
+      mutate(period = .x)  # Add a column for the current race date
+  }) %>%
+  bind_rows() %>%
+  group_by(team_name, race_name, race_year, team_points_l12m) %>%
   summarize(
-    rider_ppr = sum(uci_points)/n()
-  )
-
-reg_df = stage_df %>%
-  mutate(race_year = year(date)) %>%
-  merge(crash_df_temp,by=c("stage_url","rider_name"),all.x=T) %>%
-  merge(rider_year_temp_df,by=c("rider_name","race_year"),all.x=T) %>%
-  mutate(dnf_or_dns = status %in% c("DNF","DNS"),
-         crash_dnf = case_when(crash & status == "DNF"~T,T~F),
-         crash_dnf_pct_missed = case_when(crash & status == "DNF"~coalesce(last_crash_kms*1.00/distance,0.5),T~0),
-         stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+"))) %>%
-  merge(race_temp_df,by=c('race_name','race_year')) %>%
-  group_by(team_name, race_name, race_year,vm_per_km) %>%
-  summarize(
-    crash_dnfs = sum(crash_dnf),
-    uci_points = sum(uci_points + coalesce(gc_uci_points,0) + coalesce(points_uci_points,0) + coalesce(kom_uci_points,0) + coalesce(youth_uci_points,0)),
+    uci_points = sum(total_uci_points),
     is_one_day_race = max(is_one_day_race),
-    pct_missed_by_dnfs_or_dns_stage_race = sum((max(stage_number) - ifelse(dnf_or_dns,stage_number,max(stage_number)))/max(stage_number)),
-    pct_missed_by_crash_dnfs = case_when(
-      max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed),
-      T ~ sum((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))
-    ),
-    lost_rider_ppr_weighted = case_when(
-      max(is_one_day_race) == 1 ~ sum(crash_dnf_pct_missed*rider_ppr)/sum(crash_dnf_pct_missed),
-      T ~ sum(((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))*rider_ppr)/sum((max(stage_number) - ifelse(crash_dnf,stage_number,max(stage_number)))/max(stage_number))
-    ),
+    pct_missed_by_abandon_stage_race = sum((max(stage_number) - ifelse(abandon,stage_number,max(stage_number)))/max(stage_number)),
     max_stage = max(stage_number),
-    riders_finished = sum(coalesce(stage_number,-1) == coalesce(max_stage,-1) & status == "DF")
+    riders_finished = sum(coalesce(stage_number,-1) == coalesce(max_stage,-1) & status == "DF"),
+    race_date = min(date)
   ) %>%
   group_by(race_name,race_year) %>%
   mutate(
-    ppr = uci_points/riders_finished,
-    tp = sum(uci_points),
-    tppr = sum(uci_points)/sum(riders_finished),
-    ppr_over_tppr = ppr/tppr
+    team_ppr = uci_points/riders_finished,
+    team_points = sum(uci_points),
+    total_ppr = sum(uci_points)/sum(riders_finished),
+    team_ppr_adj = team_ppr/total_ppr
   ) %>%
   ungroup() %>%
   group_by(team_name,race_year) %>%
   mutate(
-    team_tp = sum(uci_points)
-  )
-```
-
-How did the team's points per finishing rider differ when a rider crashed out?
-# NB RERUN THIS - FIXED PCT MISSING 
-# AND WRONG FIXED EFFECTS
-# TODO TURN THIS INTO A LEGIBLE STARGAZER MULTI TABLE
-```{r}
-reg_df %>%
-  filter(!is.na(ppr_over_tppr),
-         is.finite(ppr_over_tppr),
-         !is.na(crash_dnfs)) %>%
-  felm(ppr_over_tppr ~ crash_dnfs + tp,data=.) %>% 
-  stargazer(type='text')
-```
-
-```{r}
-reg_df %>%
-  filter(!is.na(ppr_over_tppr),
-         is.finite(ppr_over_tppr),
-         !is.na(crash_dnfs)) %>%
-  felm(ppr_over_tppr ~ pct_missed_by_crash_dnfs + tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
-  stargazer(type='text')
-```
-
-```{r}
-reg_df %>%
-  filter(!is.na(ppr_over_tppr),
-         is.finite(ppr_over_tppr),
-         !is.na(crash_dnfs)) %>%
-  felm(uci_points ~ pct_missed_by_crash_dnfs*tp + team_tp + lost_rider_ppr_weighted,data=.) %>%
-  stargazer(type='text')
-```
-
-This seems to be quite unstable depending on the functional form we choose. To fix this I propose:
-* Focus on stage races where riders crash out early in the race - so teams were missing them for a lot of the race. One-day crashes are pretty tough to reason about - high likelihood they impact other riders (although this would bias in the wrong direction)
-** Although we should already mostly be capturing this by focusing on pct_missed
-* Use all DNFs, not just crashes. Or could look also at times where riders crashed and DNSed the next day. But I think pretty fair to assume early dropouts are not planned
-
-How did the team's points per finishing rider differ when riders abandoned early in a stage race? VS no abandons
-```{r}
-reg_df %>%
-  filter(!is.na(ppr_over_tppr),
-         is.finite(ppr_over_tppr),
-         !is.na(crash_dnfs)) %>% # Do I need these?
-  filter(
-    !is_one_day_race
+    team_yearly_points = sum(uci_points)
   ) %>%
-  felm(ppr_over_tppr ~ pct_missed_by_dnfs_or_dns_stage_race,data=.) %>%
-  stargazer(type='text')
+  filter(!is.na(team_ppr_adj),
+         is.finite(team_ppr_adj))
 ```
 
-Maybe better is if we look at teams that had abandons near the middle of the race and look at how they did before/after. To do this:
+
+How did the team's points per finishing rider differ when riders abandoned in a stage race?
+```{r}
+m1 = stage_race_reg_df %>% felm(team_ppr_adj ~ pct_missed_by_abandon_stage_race,data=.)
+m2 = stage_race_reg_df %>% felm(team_ppr_adj ~ pct_missed_by_abandon_stage_race | race_name + race_year,data=.)
+m3 = stage_race_reg_df %>% felm(team_ppr_adj ~ pct_missed_by_abandon_stage_race + team_points_l12m,data=.)
+m4 = stage_race_reg_df %>% felm(team_ppr_adj ~ pct_missed_by_abandon_stage_race + team_points_l12m | race_name + race_year,data=.)
+
+stargazer(m1,m2,m3,m4, type='text')
+```
+
+Stable across years?
+```{r}
+felm(team_ppr_adj ~ pct_missed_by_abandon_stage_race * factor(race_year), data = stage_race_reg_df) %>% stargazer(type='text')
+```
+
+So we see that teams do worse, per finishing rider, when they lose riders. This effect diminishes a bit when we control for a team's prior success - meaning (that better teams are more likely to lose riders?) but it is always between -0.05 and -0.11, so a 5 to 11% drop in performance per rider missing. This is not quite a marginal number, as some teams have multiple riders missing, and we'd expect that losing the second rider harms you more than losing the first rider. Something like an average treatment effect across actual losses of rider (ie teams don't often finish with just 1 rider)
+
+Alternatively: we look at teams that had abandons near the middle of the race and look at how they did before/after. To do this:
 * Build a virtual points stat: if the race ended now, what would that riders' points be? Adjust stage points to reflect how much of the race has happened
 * Filter for races where riders abandoned all on one day (for clear effects)
 * get all non-abandoning riders and sum their virtual points for each stage since crash along with actual points at the end
@@ -284,56 +143,73 @@ Also can just filter to times where this happened near the middle and check poin
 Can also just look at GC placings + stage wins/points. Will start with that
 
 ```{r}
-pre_post_df = stage_df %>%
-  mutate(stage_number = as.numeric(str_extract(stage_url, "(?<=stage-)\\d+")), # Should shift to start
-         race_year = year(date)) %>% 
+stage_race_pre_post_df = stage_df %>%
   filter(!is_one_day_race) %>%
+  group_by(race_name,race_year) %>%
+  mutate(last_stage = max(stage_number),
+         stage_1t = ceiling(last_stage/3)) %>%
   group_by(race_name,race_year,rider_name) %>%
   arrange(date) %>%
   mutate(
+    win = coalesce(ifelse(rank == 1, 1, 0),0),
     cumulative_stage_points = cumsum(uci_points),
     cumulative_wins = cumsum(ifelse(rank == 1, 1, 0)),
     abandon_stage = max(ifelse(status != c("DF"),stage_number,0),na.rm=T),
     abandon_stage = ifelse(abandon_stage == 0, NA_integer_,abandon_stage)
   ) %>%
   ungroup() %>%
+  group_by(stage_url) %>%
+  mutate(win_adj = win/sum(win,na.rm=T)) %>%
+  ungroup() %>%
   group_by(race_name,race_year,team_name) %>%
-  mutate(distinct_team_abandon_stages = n_distinct(abandon_stage,na.rm = T)) %>%
-  filter(distinct_team_abandon_stages == 1) %>% # All dropped on one day - should check how this affects selection. Could expand window or drop criteria
-  mutate(team_abandon_stage = max(abandon_stage,na.rm=T),
-         stages_since_team_abandon_stage = stage_number - team_abandon_stage) %>%
-  filter(is.na(abandon_stage)) %>% # Drop the abandoning riders from the analysis
+  mutate(first_abandon_stage = min(abandon_stage,na.rm = T),
+         last_abandon_stage = max(abandon_stage,na.rm = T),
+         abandoned = !is.na(abandon_stage),
+         team_abandoned = !is.infinite(first_abandon_stage)) %>%
+  mutate(
+    grouping = case_when(
+      !team_abandoned ~ "No abandons",
+      (first_abandon_stage > stage_1t & last_abandon_stage <= last_stage - stage_1t) ~ "Abandons only in middle third",
+      T ~ "Abandons outside middle third"
+    )
+  ) %>%
   ungroup() %>%
-  group_by(race_name,race_year) %>%
-  mutate(total_stage_points = sum(uci_points)) %>%
-  ungroup() %>%
-  group_by(race_name,race_year,stage_number,stages_since_team_abandon_stage, team_name, team_abandon_stage) %>%
+  group_by(race_name,race_year,team_name, grouping) %>%
   summarize(
-    best_placed_gc = min(rank,na.rm=T),
-    avg_gc_place = mean(rank,na.rm=T),
-    stage_uci_points_pct_of_available = sum(cumulative_stage_points,na.rm=T)/max(total_stage_points,na.rm=T),
-    stage_wins_per_stage = sum(cumulative_wins,na.rm=T)/max(stage_number)
+    best_placed_gc_1t = min(ifelse(stage_number == stage_1t,gc_rank,NA_integer_),na.rm=T),
+    best_placed_gc_1t_finishers = min(ifelse(stage_number == stage_1t & !abandoned,gc_rank,NA_integer_),na.rm=T),
+    best_placed_gc_finish = min(ifelse(stage_number == last_stage,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_1t = mean(ifelse(stage_number == stage_1t,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_1t_finishers = mean(ifelse(stage_number == stage_1t & !abandoned,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_finish = mean(ifelse(stage_number == last_stage,gc_rank,NA_integer_),na.rm=T),
+    stage_wins_per_stage_1t = sum(ifelse(stage_number <= stage_1t,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stage_wins_per_stage_1t_finishers = sum(ifelse(stage_number <= stage_1t & !abandoned,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stage_wins_per_stage_3t = sum(ifelse(stage_number > last_stage - stage_1t,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stages_1t = n_distinct(ifelse(stage_number <= stage_1t,stage_number,NA_integer_),na.rm=T),
+    stages_3t = n_distinct(ifelse(stage_number > last_stage - stage_1t,stage_number,NA_integer_),na.rm=T),
+    stage_wins_1t = sum(ifelse(stage_number <= stage_1t,win_adj,NA_integer_),na.rm=T),
+    stage_wins_3t = sum(ifelse(stage_number > last_stage - stage_1t,win_adj,NA_integer_),na.rm=T),
   )
 ```
 
 ```{r}
-pre_post_df %>%
-  filter(!is.nan(stage_uci_points_pct_of_available)) %>%
-  group_by(race_name,race_year) %>%
-  mutate(last_stage = max(stage_number)) %>%
-  # filter for middle third dropouts
-  filter(team_abandon_stage > last_stage/3,
-         team_abandon_stage <= last_stage*2/3) %>%
-  # filter for either the stage before dropouts or the final stage
-  filter(stage_number == team_abandon_stage - 1 | stage_number == last_stage) %>%
-  mutate(stage = ifelse(stage_number == last_stage,"last","last pre-abandon")) %>%
-  group_by(stage) %>%
-  summarize(
-    avg_best_placed_gc = mean(best_placed_gc),
-    avg_avg_gc_place = mean(avg_gc_place),
-    avg_stage_uci_points_pct_of_available = mean(stage_uci_points_pct_of_available),
-    avg_stage_wins_per_stage = mean(stage_wins_per_stage)
-  )
+stage_race_pre_post_df %>%
+  filter(!is.infinite(best_placed_gc_1t),
+         !is.infinite(best_placed_gc_1t_finishers)) %>%
+  ungroup() %>%
+  select(-c(race_name,team_name)) %>%
+  group_by(grouping) %>%
+  summarise(across(everything(), mean))
+```
+
+```{r}
+stage_race_pre_post_df %>%
+  filter(!is.infinite(best_placed_gc_1t),
+         !is.infinite(best_placed_gc_1t_finishers)) %>%
+  ungroup() %>%
+  select(-c(race_name,team_name)) %>%
+  group_by(grouping) %>%
+  summarise(across(everything(), sum))
 ```
 
 # Break teammates
