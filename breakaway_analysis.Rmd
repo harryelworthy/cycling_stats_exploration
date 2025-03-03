@@ -1,0 +1,100 @@
+# Break teammates
+* Filter for breakaway wins
+* Did people with teammates do better?
+
+We'd expect this would show positive even with no teammate effect. A team's second best rider is a signal of the quality of their first best rider (mathematically, but also teams in cycling have very different budgets and correspondingly different average rider qualitites). So a team with 2 riders in a break is more likely to have a stronger 1st rider than a team with 1 rider. There's also interfering effects here. For example, in a stage race, worse teams may be more keen to get riders in breakaways while better teams save riders' energy or keep them back to (hypothetically) help keep their leaders out of trouble.
+
+However it's still worth seeing if we can find any useful signal.
+
+```{r}
+gap_length_seconds = 20
+max_break_size = 20
+
+first_gaps = stage_df %>%
+  mutate(time = hms(time)) %>%
+  # Find first gap bigger than X seconds
+  group_by(stage_url) %>%
+  mutate(time_gap = lead(time,order_by=rank) - time) %>%
+  filter(time_gap > gap_length_seconds) %>%
+  summarize(first_rank_with_gap = min(rank))
+
+stage_df %>%
+  merge(first_gaps, by="stage_url",all.x=T) %>%
+  # mutate(stage_profile = NA) %>% # fill out - we want to break out by flat, hilly, mountains. and maybe by finish profile if poss
+  # Only the break in valid stages
+  filter(first_rank_with_gap <= max_break_size,
+         rank <= first_rank_with_gap) %>%
+  group_by(stage_url,team_name) %>%
+  summarize(teammates_in_first_break = n(),
+            best_placed_in_team = min(rank),
+            avg_placed_in_team = mean(rank)) %>%
+  group_by(stage_url) %>%
+  mutate(break_size = sum(teammates_in_first_break)) %>%
+  # Controlling for break size as larger break means more likely to have teammates and also lower average best placed. Maybe this is not the best way to do it though? Too tired to think
+  # Best placed in team has a nonlinear relationship with break size?
+  felm(best_placed_in_team ~ teammates_in_first_break | stage_url,data=.) %>%
+  stargazer(type='text')
+```
+
+So for each teammate in a break, your best placed rider does 2 spots better. But this could just be mechanical - best of a random pull will increase as pull size increase. To test this, I can run the same analysis, but randomizing teams within the break. 
+
+```{r}
+random_teammate_pull = function(depvar,shuffle = T){
+  temp = stage_df %>%
+    group_by(stage_url) %>%
+    mutate(
+      points_adj = uci_points/sum(uci_points)
+    ) %>%
+    merge(first_gaps, by="stage_url",all.x=T) %>%
+    # mutate(stage_profile = NA) %>% # fill out - we want to break out by flat, hilly, mountains. and maybe by finish profile if poss
+    # Only the break in valid stages
+    filter(first_rank_with_gap <= max_break_size,
+           rank <= first_rank_with_gap) %>%
+    group_by(stage_url) %>%
+    mutate(
+      random_team_name = sample(team_name),
+      team_name = case_when(shuffle ~ random_team_name,T~team_name)
+    ) %>%
+    group_by(stage_url,team_name) %>%
+    summarize(teammates_in_first_break = n(),
+              best_placed_in_team = min(rank),
+              avg_placed_in_team = mean(rank),
+              best_points = max(points_adj)) %>%
+    group_by(stage_url) %>%
+    mutate(break_size = sum(teammates_in_first_break),
+           dv = case_when(depvar=="best_placed_in_team" ~ best_placed_in_team,depvar=="best_points"~best_points)) %>% # Gross, TODO fix
+    # Controlling for break size as larger break means more likely to have teammates and also lower average best placed. Maybe this is not the best way to do it though? Too tired to think
+    # Best placed in team has a nonlinear relationship with break size?
+    felm(dv ~ teammates_in_first_break,data=.)
+  
+  temp = data.table(temp$beta,keep.rownames = T) %>%
+    filter(rn != "(Intercept)") %>%
+    select(-rn) %>%
+    mutate(treatment = case_when(shuffle ~ F,T~T),
+           depvar = depvar)
+
+  return(temp)
+}
+
+pull_runs = function(depvar,n_runs=100){
+  temp = random_teammate_pull(depvar,F)
+  
+  for (i in 1:n_runs) {
+    temp = bind_rows(temp,random_teammate_pull(depvar,T))
+  }
+  
+  return(temp)
+}
+
+placebo_results = bind_rows(
+  pull_runs("best_placed_in_team"),
+  pull_runs("best_points")
+)
+```
+
+```{r}
+placebo_results %>%
+  ggplot(aes(x=dv,group=treatment,fill=treatment)) + 
+  facet_wrap(~depvar,scales="free") +
+  geom_histogram()
+```

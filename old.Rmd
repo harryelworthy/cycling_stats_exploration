@@ -277,3 +277,20 @@ stage_race_pre_post_df %>%
     n = n()
   )
 ```
+
+
+```{r}
+best_placed_gc_1t = min(ifelse(stage_number == stage_1t,gc_rank,NA_integer_),na.rm=T),
+    best_placed_gc_1t_finishers = min(ifelse(stage_number == stage_1t & !abandoned,gc_rank,NA_integer_),na.rm=T),
+    best_placed_gc_finish = min(ifelse(stage_number == last_stage,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_1t = mean(ifelse(stage_number == stage_1t,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_1t_finishers = mean(ifelse(stage_number == stage_1t & !abandoned,gc_rank,NA_integer_),na.rm=T),
+    avg_placed_gc_finish = mean(ifelse(stage_number == last_stage,gc_rank,NA_integer_),na.rm=T),
+    stage_wins_per_stage_1t = sum(ifelse(stage_number <= stage_1t,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stage_wins_per_stage_1t_finishers = sum(ifelse(stage_number <= stage_1t & !abandoned,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stage_wins_per_stage_3t = sum(ifelse(stage_number > last_stage - stage_1t,win_adj,NA_integer_),na.rm=T)/max(stage_1t),
+    stages_1t = n_distinct(ifelse(stage_number <= stage_1t,stage_number,NA_integer_),na.rm=T),
+    stages_3t = n_distinct(ifelse(stage_number > last_stage - stage_1t,stage_number,NA_integer_),na.rm=T),
+    stage_wins_1t = sum(ifelse(stage_number <= stage_1t,win_adj,NA_integer_),na.rm=T),
+    stage_wins_3t = sum(ifelse(stage_number > last_stage - stage_1t,win_adj,NA_integer_),na.rm=T),
+```
