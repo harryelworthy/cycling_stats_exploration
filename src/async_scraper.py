@@ -1,0 +1,1003 @@
+import asyncio
+import aiohttp
+import aiosqlite
+import logging
+import re
+from typing import List, Dict, Any, Optional, Union
+from dataclasses import dataclass, field
+from datetime import datetime
+import json
+import ast
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import time
+from contextlib import asynccontextmanager
+
+# Import enhanced error logging and historical data handler
+from enhanced_error_logger import enhanced_logger
+from historical_data_handler import HistoricalDataHandler
+from rider_scraper import RiderProfileScraper
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ScrapingConfig:
+    """Configuration for the async scraper"""
+    max_concurrent_requests: int = 50
+    request_delay: float = 0.1  # Delay between requests in seconds
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    timeout: int = 30
+    database_path: str = "data/cycling_data.db"
+    
+@dataclass
+class ScrapingStats:
+    """Track scraping statistics"""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    start_time: float = field(default_factory=time.time)
+    
+    @property
+    def success_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.successful_requests / self.total_requests * 100
+    
+    @property
+    def elapsed_time(self) -> float:
+        return time.time() - self.start_time
+
+class AsyncCyclingDataScraper:
+    """Async scraper for cycling data from procyclingstats.com"""
+    
+    def __init__(self, config: ScrapingConfig = None):
+        self.config = config or ScrapingConfig()
+        self.stats = ScrapingStats()
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
+        self.rider_scraper: Optional[RiderProfileScraper] = None
+        
+        # Progress tracking attributes
+        self.progress_tracker = None
+        self.checkpoint_interval = 300  # 5 minutes
+        self.last_checkpoint = time.time()
+        
+        # Headers to mimic a real browser
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+    
+    async def __aenter__(self):
+        """Async context manager entry"""
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout)
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers=self.headers
+        )
+        await self.init_database()
+        
+        # Initialize rider scraper
+        self.rider_scraper = RiderProfileScraper(self.session, self.config.database_path)
+        await self.rider_scraper.init_rider_tables()
+        
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        if self.session:
+            await self.session.close()
+    
+    def clean_race_name(self, race_name: str) -> str:
+        """Clean and standardize race names by removing edition numbers and year prefixes"""
+        if not race_name:
+            return race_name
+        
+        name = race_name.strip()
+        
+        # Remove year prefix (e.g., "2019   »")
+        name = re.sub(r'^\d{4}\s*»\s*', '', name)
+        
+        # Remove edition numbers (e.g., "102nd", "117th", "1st", "21st")
+        name = re.sub(r'(\d+)(st|nd|rd|th)', '', name)
+        
+        # Standardize race name components
+        replacements = {
+            # Standardize spacing and dashes
+            r'Paris - Roubaix': 'Paris-Roubaix',
+            r'Milano-Sanremo': 'Milano-Sanremo', 
+            r'Liège - Bastogne - Liège': 'Liège-Bastogne-Liège',
+            r'Ronde van Vlaanderen': 'Tour of Flanders',
+            
+            # Clean up National Championships
+            r'National Championships ([^-]+) ME - Road Race': r'National Championships \1 - Road Race',
+            r'National Championships ([^-]+) ME - ITT': r'National Championships \1 - Time Trial',
+            r'National Championships ([^-]+) - ITT': r'National Championships \1 - Time Trial',
+            r'National Championships ([^-]+) ME - Time Trial': r'National Championships \1 - Time Trial',
+            r'National Championships ([^-]+)  - Road Race': r'National Championships \1 - Road Race',
+            r'National Championships ([^-]+)  - ITT': r'National Championships \1 - Time Trial',
+            
+            # Remove trailing ME and extra spaces
+            r' ME$': '',
+            r'  +': ' ',  # Multiple spaces to single space
+        }
+        
+        # Apply replacements
+        for pattern, replacement in replacements.items():
+            name = re.sub(pattern, replacement, name)
+        
+        # Clean up extra whitespace and leading/trailing characters
+        name = re.sub(r'\s+', ' ', name).strip()
+        name = name.strip('» ')
+        
+        return name
+    
+    async def init_database(self):
+        """Initialize SQLite database with required tables"""
+        async with aiosqlite.connect(self.config.database_path) as db:
+            # Create races table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS races (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    year INTEGER NOT NULL,
+                    race_name TEXT NOT NULL,
+                    race_category TEXT,
+                    uci_tour TEXT,
+                    stage_url TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create stages table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS stages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    race_id INTEGER,
+                    stage_url TEXT UNIQUE NOT NULL,
+                    is_one_day_race BOOLEAN,
+                    distance REAL,
+                    stage_type TEXT,
+                    winning_attack_length REAL,
+                    date TEXT,
+                    won_how TEXT,
+                    avg_speed_winner REAL,
+                    avg_temperature REAL,
+                    vertical_meters INTEGER,
+                    profile_icon TEXT,
+                    profile_score INTEGER,
+                    race_startlist_quality_score INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (race_id) REFERENCES races (id)
+                )
+            ''')
+            
+            # Create results table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stage_id INTEGER,
+                    rider_name TEXT,
+                    rider_url TEXT,
+                    team_name TEXT,
+                    team_url TEXT,
+                    rank INTEGER,
+                    status TEXT,
+                    time TEXT,
+                    uci_points INTEGER,
+                    pcs_points INTEGER,
+                    age INTEGER,
+                    gc_rank INTEGER,
+                    gc_uci_points INTEGER,
+                    points_rank INTEGER,
+                    points_uci_points INTEGER,
+                    kom_rank INTEGER,
+                    kom_uci_points INTEGER,
+                    youth_rank INTEGER,
+                    youth_uci_points INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (stage_id) REFERENCES stages (id)
+                )
+            ''')
+            
+            await db.commit()
+            logger.info(f"Database initialized at {self.config.database_path}")
+    
+    async def make_request(self, url: str, max_retries: int = None) -> Optional[str]:
+        """Make an HTTP request with rate limiting and retry logic"""
+        max_retries = max_retries or self.config.max_retries
+        
+        async with self.semaphore:
+            for attempt in range(max_retries + 1):
+                try:
+                    self.stats.total_requests += 1
+                    
+                    # Add delay for rate limiting
+                    if self.config.request_delay > 0:
+                        await asyncio.sleep(self.config.request_delay)
+                    
+                    async with self.session.get(url) as response:
+                        if response.status == 200:
+                            self.stats.successful_requests += 1
+                            return await response.text()
+                        else:
+                            logger.warning(f"HTTP {response.status} for {url}")
+                            
+                except Exception as e:
+                    logger.warning(f"Request failed for {url} (attempt {attempt + 1}): {e}")
+                    
+                    if attempt < max_retries:
+                        delay = self.config.retry_delay * (2 ** attempt)  # Exponential backoff
+                        await asyncio.sleep(delay)
+                    else:
+                        self.stats.failed_requests += 1
+                        logger.error(f"Failed to fetch {url} after {max_retries + 1} attempts")
+                        return None
+    
+    async def get_races(self, year: int) -> List[str]:
+        """Get list of race URLs for a given year"""
+        logger.info(f"Fetching races for year {year}")
+        
+        try:
+            # URLs for Pro Tour races and national championships
+            base_url = 'https://www.procyclingstats.com/races.php'
+            suffixes = [
+                f'?season={year}&category=1&racelevel=3&pracelevel=smallerorequal&racenation=&class=NC&filter=Filter&p=uci&s=calendar-plus-filters',
+                f'?season={year}&category=1&racelevel=2&pracelevel=smallerorequal&racenation=&class=&filter=Filter&p=uci&s=calendar-plus-filters'
+            ]
+            
+            urls = [base_url + suffix for suffix in suffixes]
+            race_urls = set()
+            
+            # Fetch both URL pages concurrently
+            tasks = [self.make_request(url) for url in urls]
+            responses = await asyncio.gather(*tasks)
+            
+            for i, html_content in enumerate(responses):
+                if html_content:
+                    try:
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        race_entries = soup.select('table tr a[href]')
+                        
+                        for entry in race_entries:
+                            race_url = entry['href']
+                            if race_url.startswith('race/') or race_url.startswith('/race/'):
+                                # Remove the leading slash if present
+                                clean_url = race_url[1:] if race_url.startswith('/') else race_url
+                                race_urls.add(clean_url)
+                    except Exception as e:
+                        enhanced_logger.log_scraping_error(
+                            stage="get_races",
+                            url=urls[i],
+                            error=e,
+                            html_content=html_content,
+                            expected_elements=['table tr a[href]', 'race/ links'],
+                            context={'year': year, 'page_index': i}
+                        )
+                        continue
+            
+            race_urls = list(race_urls)
+            
+            # Validate result count (adjust expectations for historical years)
+            min_expected_races = 10 if year >= 1980 else (5 if year >= 1950 else 1)  # Lower expectations for very old years
+            if len(race_urls) < min_expected_races:
+                error_msg = f"Only found {len(race_urls)} races for {year}, expected at least {min_expected_races}"
+                enhanced_logger.log_scraping_error(
+                    stage="get_races",
+                    url=f"races.php?season={year}",
+                    error=ValueError(error_msg),
+                    html_content=responses[0] if responses else None,
+                    expected_elements=['table tr a[href]'],
+                    context={'year': year, 'found_count': len(race_urls), 'is_historical': year < 1980}
+                )
+            
+            logger.info(f"Found {len(race_urls)} races for year {year}")
+            return race_urls
+            
+        except Exception as e:
+            enhanced_logger.log_scraping_error(
+                stage="get_races",
+                url=f"races.php?season={year}",
+                error=e,
+                expected_elements=['table tr a[href]'],
+                context={'year': year}
+            )
+            raise
+    
+    async def get_race_info(self, race_url: str) -> Optional[Dict[str, Any]]:
+        """Get race information and stage URLs"""
+        base_url = 'https://www.procyclingstats.com/'
+        full_url = urljoin(base_url, race_url)
+        
+        html_content = await self.make_request(full_url)
+        if not html_content:
+            return None
+        
+        try:
+            # Parse race information from HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract race name
+            race_name_elem = soup.find('h1')
+            raw_race_name = race_name_elem.get_text(strip=True) if race_name_elem else "Unknown"
+            race_name = self.clean_race_name(raw_race_name)
+            
+            # Extract race category and UCI tour info
+            race_category = "Unknown"
+            uci_tour = "Unknown"
+            
+            # Look for classification info
+            info_elements = soup.find_all('span', class_='classification')
+            for elem in info_elements:
+                text = elem.get_text(strip=True)
+                if 'Cat' in text or 'Class' in text:
+                    race_category = text
+                elif 'UCI' in text:
+                    uci_tour = text
+            
+            # Find stage URLs - be more specific to this race
+            stage_urls = []
+            stage_links = soup.find_all('a', href=True)
+            
+            # Extract the base race path for filtering
+            base_race_path = race_url.split('/')[0:2]  # e.g., ['race', 'nc-greece-itt']
+            base_race_prefix = '/'.join(base_race_path)
+            
+            for link in stage_links:
+                href = link['href']
+                clean_href = href[1:] if href.startswith('/') else href
+                
+                # Only include URLs that belong to this specific race
+                if (clean_href.startswith(base_race_prefix) and 
+                    ('/stage-' in href or href.endswith('/result')) and
+                    '/route/' not in href and '/startlist' not in href):
+                    stage_urls.append(clean_href)
+            
+            # Remove duplicates and sort
+            stage_urls = list(set(stage_urls))
+            
+            # If no stages found, use the race result page
+            if not stage_urls:
+                result_url = f"{race_url}/result"
+                stage_urls.append(result_url)
+            
+            # Extract year from race_url for historical context
+            year = None
+            try:
+                year = int(race_url.split('/')[-1])
+            except:
+                pass
+            
+            # Validate the extracted data (adjust expectations for historical years)
+            if race_name == "Unknown" or not stage_urls:
+                # For very early years, this might be expected if the race doesn't exist
+                if year and year < 1920:
+                    logger.info(f"Race {race_url} not found - may not exist in {year} (very early era)")
+                else:
+                    enhanced_logger.log_scraping_error(
+                        stage="get_race_info",
+                        url=full_url,
+                        error=ValueError(f"Failed to extract race info - name: {race_name}, stages: {len(stage_urls)}"),
+                        html_content=html_content,
+                        expected_elements=['h1', 'span.classification', 'stage links'],
+                        context={'race_url': race_url, 'year': year}
+                    )
+            
+            race_info = {
+                'race_name': race_name,
+                'race_category': race_category,
+                'uci_tour': uci_tour,
+                'stage_urls': stage_urls
+            }
+            
+            # Enhance with historical context if applicable
+            if year and HistoricalDataHandler.is_historical_year(year):
+                race_info = HistoricalDataHandler.enhance_historical_race_info(year, race_info)
+            
+            return race_info
+            
+        except Exception as e:
+            enhanced_logger.log_scraping_error(
+                stage="get_race_info",
+                url=full_url,
+                error=e,
+                html_content=html_content,
+                expected_elements=['h1', 'span.classification', 'a[href*="/stage-"]', 'a[href$="/result"]'],
+                context={'race_url': race_url}
+            )
+            return None
+    
+    async def get_stage_info(self, stage_url: str) -> Optional[Dict[str, Any]]:
+        """Get detailed stage information and results"""
+        base_url = 'https://www.procyclingstats.com/'
+        full_url = urljoin(base_url, stage_url)
+        
+        html_content = await self.make_request(full_url)
+        if not html_content:
+            return None
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            stage_info = {
+                'stage_url': stage_url,
+                'is_one_day_race': '/result' in stage_url and '/stage-' not in stage_url,
+                'distance': None,
+                'stage_type': None,
+                'winning_attack_length': None,
+                'date': None,
+                'won_how': None,
+                'avg_speed_winner': None,
+                'avg_temperature': None,
+                'vertical_meters': None,
+                'profile_icon': None,
+                'profile_score': None,
+                'race_startlist_quality_score': None,
+                'results': [],
+                'gc': [],
+                'points': [],
+                'kom': [],
+                'youth': []
+            }
+            
+            # Extract stage details from infolist
+            infolist = soup.find('ul', class_='infolist')
+            if infolist:
+                for li in infolist.find_all('li'):
+                    text = li.get_text(strip=True)
+                    if 'km' in text.lower() and 'distance' in text.lower():
+                        try:
+                            distance_str = ''.join(filter(str.isdigit, text.split('km')[0]))
+                            if distance_str:
+                                stage_info['distance'] = float(distance_str)
+                        except:
+                            pass
+                    elif 'date' in text.lower():
+                        stage_info['date'] = text.split(':')[-1].strip() if ':' in text else text
+            
+            # Extract results from main results table
+            results_table = soup.find('table', class_='results')
+            if results_table:
+                stage_info['results'] = self.parse_results_table(results_table)
+            else:
+                # Log missing results table as potential issue
+                enhanced_logger.log_scraping_error(
+                    stage="get_stage_info",
+                    url=full_url,
+                    error=ValueError("No results table found"),
+                    html_content=html_content,
+                    expected_elements=['table.results'],
+                    context={'stage_url': stage_url}
+                )
+            
+            # Extract secondary classifications
+            for classification in ['gc', 'points', 'kom', 'youth']:
+                class_table = soup.find('table', {'id': f'{classification}table'})
+                if class_table:
+                    stage_info[classification] = self.parse_results_table(class_table, secondary=True)
+            
+            # Extract year for historical context
+            year = None
+            try:
+                year = int(stage_url.split('/')[2])
+            except:
+                pass
+            
+            # Validate results (adjust expectations for historical years)
+            if not stage_info['results']:
+                # For very early years, missing results might be expected
+                if year and year < 1920:
+                    logger.warning(f"No results found for {stage_url} - may be expected for {year}")
+                else:
+                    enhanced_logger.log_scraping_error(
+                        stage="get_stage_info",
+                        url=full_url,
+                        error=ValueError("No results extracted from stage"),
+                        html_content=html_content,
+                        expected_elements=['table.results', 'table tr', 'rider names'],
+                        context={'stage_url': stage_url, 'is_one_day_race': stage_info['is_one_day_race'], 'year': year}
+                    )
+            
+            return stage_info
+            
+        except Exception as e:
+            enhanced_logger.log_scraping_error(
+                stage="get_stage_info",
+                url=full_url,
+                error=e,
+                html_content=html_content,
+                expected_elements=['table.results', 'ul.infolist', 'table tr'],
+                context={'stage_url': stage_url}
+            )
+            return None
+    
+    def parse_results_table(self, table, secondary=False) -> List[Dict[str, Any]]:
+        """Parse a results table from HTML"""
+        results = []
+        
+        try:
+            rows = table.find_all('tr')  # Don't skip first row - it might be data
+            
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) < 3:
+                    continue
+                
+                result = {}
+                
+                # Extract rider name and URL (handle URLs with or without leading slash)
+                rider_link = row.find('a', href=lambda x: x and ('rider/' in x or '/rider/' in x))
+                if rider_link:
+                    result['rider_name'] = rider_link.get_text(strip=True)
+                    result['rider_url'] = rider_link['href']
+                
+                # Extract team name and URL (handle URLs with or without leading slash)
+                team_link = row.find('a', href=lambda x: x and ('team/' in x or '/team/' in x))
+                if team_link:
+                    result['team_name'] = team_link.get_text(strip=True)
+                    result['team_url'] = team_link['href']
+                
+                # Extract rank (usually first column)
+                if cells:
+                    rank_text = cells[0].get_text(strip=True)
+                    try:
+                        result['rank'] = int(rank_text) if rank_text.isdigit() else None
+                    except:
+                        result['rank'] = None
+                
+                # Extract other data based on column headers
+                for i, cell in enumerate(cells):
+                    text = cell.get_text(strip=True)
+                    
+                    # Time column
+                    if ':' in text and ('.' in text or text.count(':') >= 2):
+                        result['time'] = text
+                    
+                    # Points columns
+                    elif text.isdigit() and int(text) > 0:
+                        if not secondary:
+                            if 'uci_points' not in result:
+                                result['uci_points'] = int(text)
+                            elif 'pcs_points' not in result:
+                                result['pcs_points'] = int(text)
+                        else:
+                            result['uci_points'] = int(text)
+                    
+                    # Age column (typically 2-digit number)
+                    elif text.isdigit() and 18 <= int(text) <= 50:
+                        result['age'] = int(text)
+                    
+                    # Status indicators
+                    elif text.upper() in ['DNF', 'DNS', 'DSQ', 'OTL']:
+                        result['status'] = text.upper()
+                
+                # Set default values
+                result.setdefault('status', 'FINISHED')
+                result.setdefault('uci_points', 0)
+                result.setdefault('pcs_points', 0)
+                
+                if result.get('rider_name'):
+                    results.append(result)
+                    
+        except Exception as e:
+            logger.error(f"Error parsing results table: {e}")
+        
+        return results
+    
+    async def save_race_data(self, year: int, race_data: Dict[str, Any]) -> Optional[int]:
+        """Save race data to SQLite database"""
+        async with aiosqlite.connect(self.config.database_path) as db:
+            try:
+                # Insert race record
+                race_cursor = await db.execute('''
+                    INSERT OR IGNORE INTO races (year, race_name, race_category, uci_tour, stage_url)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    year,
+                    race_data['race_name'],
+                    race_data['race_category'],
+                    race_data['uci_tour'],
+                    race_data['stage_urls'][0] if race_data['stage_urls'] else ''
+                ))
+                
+                race_id = race_cursor.lastrowid
+                
+                # If race already exists, get its ID
+                if race_id == 0:
+                    cursor = await db.execute(
+                        'SELECT id FROM races WHERE stage_url = ?',
+                        (race_data['stage_urls'][0] if race_data['stage_urls'] else '',)
+                    )
+                    row = await cursor.fetchone()
+                    race_id = row[0] if row else None
+                
+                await db.commit()
+                return race_id
+                
+            except Exception as e:
+                logger.error(f"Error saving race data: {e}")
+                return None
+    
+    async def save_stage_data(self, race_id: int, stage_data: Dict[str, Any]) -> Optional[int]:
+        """Save stage data to SQLite database"""
+        async with aiosqlite.connect(self.config.database_path) as db:
+            try:
+                # Insert stage record
+                stage_cursor = await db.execute('''
+                    INSERT OR IGNORE INTO stages (
+                        race_id, stage_url, is_one_day_race, distance, stage_type,
+                        winning_attack_length, date, won_how, avg_speed_winner,
+                        avg_temperature, vertical_meters, profile_icon, profile_score,
+                        race_startlist_quality_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    race_id,
+                    stage_data['stage_url'],
+                    stage_data['is_one_day_race'],
+                    stage_data['distance'],
+                    stage_data['stage_type'],
+                    stage_data['winning_attack_length'],
+                    stage_data['date'],
+                    stage_data['won_how'],
+                    stage_data['avg_speed_winner'],
+                    stage_data['avg_temperature'],
+                    stage_data['vertical_meters'],
+                    stage_data['profile_icon'],
+                    stage_data['profile_score'],
+                    stage_data['race_startlist_quality_score']
+                ))
+                
+                stage_id = stage_cursor.lastrowid
+                
+                # If stage already exists, get its ID
+                if stage_id == 0:
+                    cursor = await db.execute(
+                        'SELECT id FROM stages WHERE stage_url = ?',
+                        (stage_data['stage_url'],)
+                    )
+                    row = await cursor.fetchone()
+                    stage_id = row[0] if row else None
+                
+                await db.commit()
+                return stage_id
+                
+            except Exception as e:
+                logger.error(f"Error saving stage data: {e}")
+                return None
+    
+    async def save_results_data(self, stage_id: int, stage_data: Dict[str, Any]):
+        """Save results data to SQLite database"""
+        async with aiosqlite.connect(self.config.database_path) as db:
+            try:
+                # Prepare results with secondary classifications
+                results = stage_data.get('results', [])
+                gc_results = {r.get('rider_url'): r for r in stage_data.get('gc', [])}
+                points_results = {r.get('rider_url'): r for r in stage_data.get('points', [])}
+                kom_results = {r.get('rider_url'): r for r in stage_data.get('kom', [])}
+                youth_results = {r.get('rider_url'): r for r in stage_data.get('youth', [])}
+                
+                for result in results:
+                    rider_url = result.get('rider_url')
+                    
+                    # Merge secondary classification data
+                    gc_data = gc_results.get(rider_url, {})
+                    points_data = points_results.get(rider_url, {})
+                    kom_data = kom_results.get(rider_url, {})
+                    youth_data = youth_results.get(rider_url, {})
+                    
+                    await db.execute('''
+                        INSERT OR IGNORE INTO results (
+                            stage_id, rider_name, rider_url, team_name, team_url,
+                            rank, status, time, uci_points, pcs_points, age,
+                            gc_rank, gc_uci_points, points_rank, points_uci_points,
+                            kom_rank, kom_uci_points, youth_rank, youth_uci_points
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        stage_id,
+                        result.get('rider_name'),
+                        result.get('rider_url'),
+                        result.get('team_name'),
+                        result.get('team_url'),
+                        result.get('rank'),
+                        result.get('status'),
+                        result.get('time'),
+                        result.get('uci_points'),
+                        result.get('pcs_points'),
+                        result.get('age'),
+                        gc_data.get('rank'),
+                        gc_data.get('uci_points'),
+                        points_data.get('rank'),
+                        points_data.get('uci_points'),
+                        kom_data.get('rank'),
+                        kom_data.get('uci_points'),
+                        youth_data.get('rank'),
+                        youth_data.get('uci_points')
+                    ))
+                
+                await db.commit()
+                logger.debug(f"Saved {len(results)} results for stage {stage_id}")
+                
+            except Exception as e:
+                logger.error(f"Error saving results data: {e}")
+    
+    async def scrape_year(self, year: int):
+        """Scrape all data for a given year"""
+        logger.info(f"Starting scrape for year {year}")
+        start_time = time.time()
+        
+        # Get all race URLs for the year
+        race_urls = await self.get_races(year)
+        logger.info(f"Found {len(race_urls)} races for {year}")
+        
+        # Process races in batches to avoid overwhelming the server
+        batch_size = 10
+        total_stages = 0
+        
+        for i in range(0, len(race_urls), batch_size):
+            batch = race_urls[i:i + batch_size]
+            logger.info(f"Processing race batch {i//batch_size + 1}/{(len(race_urls) + batch_size - 1)//batch_size}")
+            
+            # Get race info for batch
+            race_info_tasks = [self.get_race_info(race_url) for race_url in batch]
+            race_infos = await asyncio.gather(*race_info_tasks)
+            
+            # Process each race
+            for race_url, race_info in zip(batch, race_infos):
+                if not race_info:
+                    continue
+                
+                # Save race data
+                race_id = await self.save_race_data(year, race_info)
+                if not race_id:
+                    continue
+                
+                logger.info(f"Processing race: {race_info['race_name']} ({len(race_info['stage_urls'])} stages)")
+                
+                # Process stages for this race
+                stage_tasks = [self.get_stage_info(stage_url) for stage_url in race_info['stage_urls']]
+                stage_infos = await asyncio.gather(*stage_tasks)
+                
+                for stage_info in stage_infos:
+                    if stage_info:
+                        stage_id = await self.save_stage_data(race_id, stage_info)
+                        if stage_id:
+                            await self.save_results_data(stage_id, stage_info)
+                            total_stages += 1
+                
+                # Add small delay between races
+                await asyncio.sleep(0.5)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Completed scraping {year}: {total_stages} stages in {elapsed_time:.2f}s")
+        logger.info(f"Stats: {self.stats.successful_requests}/{self.stats.total_requests} requests successful ({self.stats.success_rate:.1f}%)")
+    
+    async def scrape_years(self, years: List[int]):
+        """Scrape data for multiple years (legacy method without progress tracking)"""
+        logger.info(f"Starting scrape for years: {years}")
+        
+        for year in years:
+            try:
+                await self.scrape_year(year)
+            except Exception as e:
+                logger.error(f"Error scraping year {year}: {e}")
+        
+        logger.info(f"Scraping completed. Total stats: {self.stats.successful_requests}/{self.stats.total_requests} requests successful")
+    
+    async def scrape_years_with_progress(self, years: List[int]):
+        """Scrape data for multiple years with comprehensive progress tracking"""
+        logger.info(f"Starting scrape with progress tracking for years: {years}")
+        
+        for i, year in enumerate(years):
+            try:
+                # Check if year should be skipped
+                if self.progress_tracker and await self.progress_tracker.should_skip_year(year):
+                    logger.info(f"⏭️  Skipping year {year} - already completed")
+                    continue
+                
+                logger.info(f"🚀 Processing year {year} ({i+1}/{len(years)})")
+                
+                # Show progress report periodically
+                if self.progress_tracker and i > 0:
+                    report = await self.progress_tracker.get_status_report(years)
+                    logger.info(f"📊 Progress Update:\n{report}")
+                
+                await self.scrape_year_with_progress(year)
+                
+                # Mark year as completed
+                if self.progress_tracker:
+                    await self.progress_tracker.mark_year_completed(year)
+                
+                logger.info(f"✅ Year {year} completed successfully")
+                
+            except Exception as e:
+                logger.error(f"💥 Error scraping year {year}: {e}")
+                
+                # Mark year as failed but continue with next year
+                if self.progress_tracker:
+                    await self.progress_tracker.mark_year_failed(year, str(e))
+                
+                # Continue with next year rather than stopping
+                continue
+        
+        logger.info(f"🏁 Scraping completed. Total stats: {self.stats.successful_requests}/{self.stats.total_requests} requests successful")
+        
+        # Final checkpoint
+        if self.progress_tracker:
+            await self.progress_tracker.create_checkpoint("Final completion checkpoint")
+    
+    async def scrape_year_with_progress(self, year: int):
+        """Scrape all data for a given year with progress tracking"""
+        logger.info(f"Starting scrape for year {year}")
+        start_time = time.time()
+        
+        # Get all race URLs for the year
+        race_urls = await self.get_races(year)
+        logger.info(f"Found {len(race_urls)} races for {year}")
+        
+        # Process races in batches to avoid overwhelming the server
+        batch_size = 10
+        total_stages = 0
+        
+        for i in range(0, len(race_urls), batch_size):
+            batch = race_urls[i:i + batch_size]
+            logger.info(f"Processing race batch {i//batch_size + 1}/{(len(race_urls) + batch_size - 1)//batch_size}")
+            
+            # Get race info for batch
+            race_info_tasks = [self.get_race_info(race_url) for race_url in batch]
+            race_infos = await asyncio.gather(*race_info_tasks)
+            
+            # Process each race
+            for race_url, race_info in zip(batch, race_infos):
+                try:
+                    # Check if race should be skipped
+                    if self.progress_tracker and await self.progress_tracker.should_skip_race(race_url):
+                        logger.debug(f"⏭️  Skipping race {race_url} - already completed")
+                        continue
+                    
+                    if not race_info:
+                        if self.progress_tracker:
+                            await self.progress_tracker.mark_race_failed(race_url, "Failed to get race info")
+                        continue
+                    
+                    # Save race data
+                    race_id = await self.save_race_data(year, race_info)
+                    if not race_id:
+                        if self.progress_tracker:
+                            await self.progress_tracker.mark_race_failed(race_url, "Failed to save race data")
+                        continue
+                    
+                    logger.info(f"Processing race: {race_info['race_name']} ({len(race_info['stage_urls'])} stages)")
+                    
+                    # Process stages for this race
+                    stage_tasks = [self.get_stage_info(stage_url) for stage_url in race_info['stage_urls']]
+                    stage_infos = await asyncio.gather(*stage_tasks)
+                    
+                    race_stages = 0
+                    race_results = 0
+                    
+                    for stage_info in stage_infos:
+                        if stage_info:
+                            stage_id = await self.save_stage_data(race_id, stage_info)
+                            if stage_id:
+                                await self.save_results_data(stage_id, stage_info)
+                                race_stages += 1
+                                race_results += len(stage_info.get('results', []))
+                                total_stages += 1
+                    
+                    # Mark race as completed
+                    if self.progress_tracker:
+                        await self.progress_tracker.mark_race_completed(race_url, race_stages, race_results)
+                    
+                    # Periodic checkpoint
+                    if self.progress_tracker and time.time() - self.last_checkpoint > self.checkpoint_interval:
+                        await self.progress_tracker.create_checkpoint(f"Processing year {year}")
+                        self.last_checkpoint = time.time()
+                    
+                except Exception as e:
+                    logger.error(f"Error processing race {race_url}: {e}")
+                    if self.progress_tracker:
+                        await self.progress_tracker.mark_race_failed(race_url, str(e))
+                    # Continue with next race
+                    continue
+                
+                # Add small delay between races
+                await asyncio.sleep(0.5)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Completed scraping {year}: {total_stages} stages in {elapsed_time:.2f}s")
+        logger.info(f"Stats: {self.stats.successful_requests}/{self.stats.total_requests} requests successful ({self.stats.success_rate:.1f}%)")
+
+    async def scrape_riders_for_years(self, years: List[int], enable_rider_scraping: bool = True) -> Dict[str, int]:
+        """Scrape rider profile data for all riders who competed in the specified years"""
+        if not enable_rider_scraping or not self.rider_scraper:
+            logger.info("🚫 Rider scraping disabled or not initialized")
+            return {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        logger.info(f"🏃 Starting rider profile scraping for years: {years}")
+        
+        # Use conservative concurrency for rider scraping to be polite
+        max_concurrent = min(5, self.config.max_concurrent_requests // 10)
+        
+        # Scrape rider profiles for the specified years
+        results = await self.rider_scraper.update_rider_data_for_years(years, max_concurrent)
+        
+        logger.info(f"🎉 Rider scraping completed for years {years}")
+        return results
+
+    async def scrape_all_missing_riders(self) -> Dict[str, int]:
+        """Scrape profile data for all riders missing from the database"""
+        if not self.rider_scraper:
+            logger.error("🚫 Rider scraper not initialized")
+            return {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        logger.info("🏃 Starting rider profile scraping for all missing riders")
+        
+        # Use conservative concurrency for rider scraping to be polite
+        max_concurrent = min(5, self.config.max_concurrent_requests // 10)
+        
+        # Scrape all missing rider profiles
+        results = await self.rider_scraper.scrape_all_missing_riders(max_concurrent)
+        
+        logger.info("🎉 All missing rider profile scraping completed")
+        return results
+
+    async def scrape_years_with_riders(self, years: List[int], enable_rider_scraping: bool = True):
+        """Scrape race data and then rider profiles for specified years"""
+        logger.info(f"🚀 Starting comprehensive scraping (races + riders) for years: {years}")
+        
+        # First scrape race data
+        await self.scrape_years_with_progress(years)
+        
+        # Then scrape rider profiles if enabled
+        if enable_rider_scraping:
+            logger.info("🔄 Starting rider profile collection phase...")
+            rider_results = await self.scrape_riders_for_years(years, enable_rider_scraping)
+            
+            logger.info(f"📊 Final rider scraping results:")
+            logger.info(f"   ✅ Riders processed: {rider_results['success']}")
+            logger.info(f"   ❌ Failed: {rider_results['failed']}")
+            logger.info(f"   ⏭️  Skipped: {rider_results['skipped']}")
+        else:
+            logger.info("⏭️  Skipping rider profile collection")
+        
+        logger.info(f"🏁 Comprehensive scraping completed for years: {years}")
+
+    async def update_rider_data_for_years(self, years: List[int]) -> Dict[str, int]:
+        """Standalone function to update rider data for specific years"""
+        if not self.rider_scraper:
+            logger.error("🚫 Rider scraper not initialized")
+            return {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        logger.info(f"🔄 Updating rider data for years: {years}")
+        
+        # Use conservative concurrency
+        max_concurrent = min(5, self.config.max_concurrent_requests // 10)
+        
+        results = await self.rider_scraper.update_rider_data_for_years(years, max_concurrent)
+        
+        logger.info(f"✅ Rider data update completed for years {years}")
+        return results
+
+
+# Example usage
+async def main():
+    """Example usage of the async scraper"""
+    config = ScrapingConfig(
+        max_concurrent_requests=30,  # Conservative for testing
+        request_delay=0.1,
+        database_path="data/cycling_data.db"
+    )
+    
+    async with AsyncCyclingDataScraper(config) as scraper:
+        # Scrape data for recent years
+        await scraper.scrape_years([2023, 2024])
+
+if __name__ == "__main__":
+    asyncio.run(main())

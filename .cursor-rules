@@ -1,0 +1,75 @@
+# Cycling Stats Exploration - Cursor Rules
+
+## Project Overview
+Comprehensive cycling data scraping and analysis toolkit for ProCyclingStats.com.
+Features race data scraping, detailed rider profile collection, and robust data management.
+
+## Documentation First
+**ALWAYS read the project documentation before making changes:**
+- `README.md` - Project overview, installation, and usage
+- `TESTING.md` - Testing framework and validation
+- `docs/RIDER_SCRAPING.md` - Complete rider profile scraping guide
+- `docs/CLEANUP_NOTES.md` - Recent cleanup changes
+
+## Project Architecture
+- **Main Scraper**: `src/async_scraper.py` - Core race data scraping engine
+- **Rider Scraper**: `src/rider_scraper.py` - Detailed rider profile scraping
+- **CLI Entry**: `src/main.py` - Primary command-line interface
+- **Testing**: `src/test_scraper.py` - Comprehensive validation framework
+- **Progress**: `src/progress_tracker.py` - Resume capability and checkpointing
+- **Utilities**: `src/update_riders.py` - Standalone rider data updater
+
+## Database Schema
+- **races, stages, results** - Core race data tables
+- **riders, rider_teams, rider_achievements** - Rider profile tables
+- SQLite database with async operations (aiosqlite)
+
+## Code Standards
+- **Async/await** for all HTTP operations
+- **Conservative rate limiting**: 30 concurrent for races, 5 for riders
+- **Request delays**: 0.1s for races, 0.2s for riders
+- **Robust error handling** with detailed logging
+- **Progress tracking** for resume capability
+- **Type hints** for all public APIs
+
+## Key Libraries
+- `aiohttp` - Async HTTP requests with session management
+- `aiosqlite` - Async SQLite operations
+- `beautifulsoup4` - HTML parsing and data extraction
+- `asyncio` - Concurrency control and semaphores
+
+## Development Workflow
+1. **Run tests first**: `python src/run_tests.py`
+2. **Check existing functionality** before adding features
+3. **Follow existing patterns** in async_scraper.py and rider_scraper.py
+4. **Update documentation** for new features
+5. **Test with small datasets** before large scraping jobs
+
+## ProCyclingStats.com Specifics
+- **Respectful scraping**: Conservative concurrent requests and delays
+- **Race URLs**: `/race/race-name/year/result` pattern
+- **Rider URLs**: `/rider/rider-name` pattern
+- **Multi-stage races**: Each stage has separate URL and results
+- **Data quality**: Modern data (2000+) is comprehensive, older data varies
+- **Format changes**: Use test framework to detect and handle
+
+## CLI Usage Patterns
+```bash
+# Standard race scraping
+python src/main.py 2023 2024
+
+# With rider profiles
+python src/main.py 2023 2024 --enable-rider-scraping
+
+# Rider profiles only
+python src/update_riders.py --all-missing
+
+# Testing
+python src/run_tests.py
+```
+
+## Performance Considerations
+- **Long-running jobs**: Use progress tracking and resume capability
+- **Database size**: Can reach GB scale for comprehensive datasets
+- **Memory usage**: Batch processing prevents memory bloat
+- **Network respect**: Built-in rate limiting and retry logic
