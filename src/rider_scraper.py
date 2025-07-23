@@ -127,6 +127,9 @@ class RiderProfileScraper:
             # Handle relative URLs
             if rider_url.startswith('/'):
                 full_url = f"{self.base_url}{rider_url}"
+            elif rider_url.startswith('rider/'):
+                # URL already has rider/ prefix
+                full_url = f"{self.base_url}/{rider_url}"
             else:
                 full_url = f"{self.base_url}/rider/{rider_url}"
         else:
@@ -183,82 +186,142 @@ class RiderProfileScraper:
                 if h1:
                     profile_data['rider_name'] = h1.text.strip()
             
-            # Extract basic info from the info section
-            info_section = soup.find('div', class_='info') or soup.find('div', {'id': 'info'})
-            if info_section:
-                await self._parse_basic_info(info_section, profile_data)
+            # Extract basic info from ul.list elements
+            await self._parse_basic_info(soup, profile_data)
             
-            # Extract profile scores/specialties
-            specialties_section = soup.find('div', text=re.compile(r'Specialties', re.I))
-            if specialties_section:
-                await self._parse_specialties(specialties_section.parent, profile_data)
+            # Extract profile scores/specialties from ul.pps.list
+            await self._parse_specialties(soup, profile_data)
             
-            # Extract rankings
-            await self._parse_rankings(soup, profile_data)
-            
-            # Extract career statistics
-            await self._parse_career_stats(soup, profile_data)
-            
-            # Extract team history
-            await self._parse_team_history(soup, profile_data)
-            
-            # Extract top achievements
-            await self._parse_achievements(soup, profile_data)
+            # Note: Rankings, career stats, team history, and achievements parsing 
+            # have been removed as requested - achievements can be derived from race data
             
         except Exception as e:
             logger.error(f"Error parsing rider profile: {e}")
             
         return profile_data
 
-    async def _parse_basic_info(self, info_section, profile_data):
+    async def _parse_basic_info(self, soup, profile_data):
         """Parse basic rider information like DOB, nationality, etc."""
-        # Look for date of birth
-        dob_pattern = re.compile(r'Date of birth.*?(\d{1,2}).*?(\w+).*?(\d{4})', re.I | re.DOTALL)
-        dob_match = dob_pattern.search(info_section.text)
-        if dob_match:
-            day, month_name, year = dob_match.groups()
-            try:
-                # Convert month name to number
-                month_map = {
-                    'January': 1, 'February': 2, 'March': 3, 'April': 4,
-                    'May': 5, 'June': 6, 'July': 7, 'August': 8,
-                    'September': 9, 'October': 10, 'November': 11, 'December': 12
-                }
-                month = month_map.get(month_name, None)
-                if month:
-                    profile_data['date_of_birth'] = f"{year}-{month:02d}-{int(day):02d}"
-            except:
-                pass
         
-        # Extract nationality
-        nationality_pattern = re.compile(r'Nationality.*?([A-Za-z\s]+)', re.I)
-        nationality_match = nationality_pattern.search(info_section.text)
-        if nationality_match:
-            profile_data['nationality'] = nationality_match.group(1).strip()
+        # Find all ul.list elements that contain the structured data
+        list_elements = soup.find_all('ul', class_='list')
         
-        # Extract weight
-        weight_pattern = re.compile(r'Weight.*?(\d+).*?kg', re.I)
-        weight_match = weight_pattern.search(info_section.text)
-        if weight_match:
-            profile_data['weight_kg'] = int(weight_match.group(1))
-        
-        # Extract height
-        height_pattern = re.compile(r'Height.*?(\d+\.?\d*?).*?m', re.I)
-        height_match = height_pattern.search(info_section.text)
-        if height_match:
-            height_m = float(height_match.group(1))
-            profile_data['height_cm'] = int(height_m * 100)
-        
-        # Extract place of birth
-        place_pattern = re.compile(r'Place of birth.*?([A-Za-z\s,.-]+)', re.I)
-        place_match = place_pattern.search(info_section.text)
-        if place_match:
-            profile_data['place_of_birth'] = place_match.group(1).strip()
+        for ul_element in list_elements:
+            li_elements = ul_element.find_all('li')
+            
+            for li in li_elements:
+                text = li.get_text(strip=True)
+                
+                # Parse Date of birth
+                if 'Date of birth:' in text:
+                    # Extract day, month, year from the div elements
+                    divs = li.find_all('div')
+                    try:
+                        day = None
+                        month = None
+                        year = None
+                        
+                        for i, div in enumerate(divs):
+                            div_text = div.get_text(strip=True)
+                            
+                            # Look for day (like "25th")
+                            if div_text.endswith(('st', 'nd', 'rd', 'th')) and div_text[:-2].isdigit():
+                                day = int(div_text[:-2])
+                            
+                            # Look for month name
+                            month_names = ['January', 'February', 'March', 'April', 'May', 'June',
+                                          'July', 'August', 'September', 'October', 'November', 'December']
+                            if div_text in month_names:
+                                month = month_names.index(div_text) + 1
+                            
+                            # Look for year (4 digits)
+                            if div_text.isdigit() and len(div_text) == 4:
+                                year = int(div_text)
+                        
+                        if day and month and year:
+                            profile_data['date_of_birth'] = f"{year}-{month:02d}-{day:02d}"
+                    except Exception as e:
+                        logger.debug(f"Error parsing date of birth: {e}")
+                
+                # Parse Nationality
+                elif 'Nationality:' in text:
+                    # Look for country link
+                    country_link = li.find('a')
+                    if country_link:
+                        profile_data['nationality'] = country_link.get_text(strip=True)
+                
+                # Parse Weight and Height (they're in the same li)
+                elif 'Weight:' in text and 'Height:' in text:
+                    divs = li.find_all('div')
+                    try:
+                        for i, div in enumerate(divs):
+                            div_text = div.get_text(strip=True)
+                            
+                            # Look for weight (number before "kg")
+                            if div_text.isdigit() and i + 1 < len(divs):
+                                next_div = divs[i + 1].get_text(strip=True)
+                                if next_div == 'kg':
+                                    profile_data['weight_kg'] = int(div_text)
+                            
+                            # Look for height (decimal number before "m")
+                            if div_text.replace('.', '').isdigit() and '.' in div_text and i + 1 < len(divs):
+                                next_div = divs[i + 1].get_text(strip=True)
+                                if next_div == 'm':
+                                    height_m = float(div_text)
+                                    profile_data['height_cm'] = int(height_m * 100)
+                    except Exception as e:
+                        logger.debug(f"Error parsing weight/height: {e}")
 
-    async def _parse_specialties(self, specialties_section, profile_data):
-        """Parse rider specialty scores"""
-        # Look for numerical scores next to specialty names
-        specialties_text = specialties_section.text
+    async def _parse_specialties(self, soup, profile_data):
+        """Parse rider specialty scores from ul.pps.list structure"""
+        
+        # Find the ul element with classes 'pps' and 'list'
+        pps_list = soup.find('ul', class_=['pps', 'list'])
+        
+        if pps_list:
+            li_elements = pps_list.find_all('li')
+            
+            for li in li_elements:
+                try:
+                    # Find the score value in xvalue div
+                    xvalue_div = li.find('div', class_='xvalue')
+                    # Find the specialty name in xtitle div
+                    xtitle_div = li.find('div', class_='xtitle')
+                    
+                    if xvalue_div and xtitle_div:
+                        score = int(xvalue_div.get_text(strip=True))
+                        
+                        # Extract specialty name from the link
+                        specialty_link = xtitle_div.find('a')
+                        if specialty_link:
+                            specialty_text = specialty_link.get_text(strip=True).lower()
+                            
+                            # Map the specialty names to our standard names
+                            specialty_mapping = {
+                                'onedayraces': 'oneday',
+                                'gc': 'gc', 
+                                'tt': 'tt',
+                                'sprint': 'sprint',
+                                'climber': 'climber',
+                                'hills': 'hills'
+                            }
+                            
+                            # Find matching specialty
+                            for pcs_name, our_name in specialty_mapping.items():
+                                if pcs_name in specialty_text:
+                                    profile_data['profile_scores'][our_name] = score
+                                    break
+                            
+                except Exception as e:
+                    logger.debug(f"Error parsing specialty score: {e}")
+        
+        # Also try alternative parsing if the structure is different
+        if not profile_data['profile_scores']:
+            await self._parse_specialties_fallback(soup, profile_data)
+    
+    async def _parse_specialties_fallback(self, soup, profile_data):
+        """Fallback method for parsing specialties using text patterns"""
+        page_text = soup.get_text()
         
         patterns = {
             'climber': re.compile(r'(\d+).*?Climber', re.I),
@@ -270,7 +333,7 @@ class RiderProfileScraper:
         }
         
         for specialty, pattern in patterns.items():
-            match = pattern.search(specialties_text)
+            match = pattern.search(page_text)
             if match:
                 profile_data['profile_scores'][specialty] = int(match.group(1))
 
