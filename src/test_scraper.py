@@ -33,6 +33,27 @@ class TestRace:
     description: str
 
 @dataclass
+class KnownResult:
+    """Known result for accuracy validation"""
+    race_url: str
+    rider_name: str
+    expected_rank: int
+    expected_uci_points: Optional[int] = None
+    expected_pcs_points: Optional[int] = None
+    expected_time: Optional[str] = None
+    expected_team: Optional[str] = None
+    expected_age: Optional[int] = None
+    expected_time_gap: Optional[str] = None  # e.g., "4:43" for time behind
+    expected_avg_speed: Optional[float] = None  # e.g., 43.74 kph
+    expected_won_how: Optional[str] = None  # e.g., "Spring of small group"
+    expected_startlist_quality: Optional[int] = None  # e.g., 1933
+    expected_distance: Optional[float] = None  # e.g., 161.0 km
+    expected_elevation: Optional[int] = None  # e.g., 1679 m
+    expected_profile_score: Optional[int] = None  # e.g., 29
+    description: str = ""
+    test_type: str = "general"  # 'gc', 'stage', 'general', 'historical'
+
+@dataclass
 class TestResult:
     """Result of a test case"""
     test_name: str
@@ -63,6 +84,115 @@ class ScraperTestFramework:
         )
         self.validation_errors: List[ScrapingValidationError] = []
         self.test_results: List[TestResult] = []
+        
+        # Known results for accuracy validation - VERIFIED DATA FROM USER
+        self.known_results = [
+            # === VERIFIED GRAND TOUR GC RESULTS ===
+            # 2013 Giro d'Italia Winner - Vincenzo Nibali
+            KnownResult(
+                race_url="race/giro-d-italia/2013/gc",
+                rider_name="Vincenzo Nibali",
+                expected_rank=1,
+                expected_pcs_points=400,  # User verified: Nibali won 400 PCS points for GC
+                test_type="gc",
+                description="Vincenzo Nibali Giro 2013 GC Winner - 400 PCS points (VERIFIED)"
+            ),
+            
+            # 2013 Giro d'Italia 2nd place - Rigoberto Uran
+            KnownResult(
+                race_url="race/giro-d-italia/2013/gc",
+                rider_name="Rigoberto Uran",
+                expected_rank=2,
+                expected_pcs_points=290,  # User verified: Uran got 290 PCS points for 2nd
+                expected_time_gap="4:43",  # User verified: 4:43 behind
+                test_type="gc",
+                description="Rigoberto Uran Giro 2013 GC 2nd - 290 PCS points, +4:43 (VERIFIED)"
+            ),
+            
+            # 1930 Tour de France Winner - André Leducq  
+            KnownResult(
+                race_url="race/tour-de-france/1930/gc",
+                rider_name="André Leducq",
+                expected_rank=1,
+                expected_pcs_points=500,  # User verified: 500 PCS points for GC win
+                test_type="historical",
+                description="André Leducq TDF 1930 GC Winner - 500 PCS points (VERIFIED)"
+            ),
+            
+            # === VERIFIED CLASSICS ===
+            # 1980 Paris-Roubaix Winner - Francesco Moser
+            KnownResult(
+                race_url="race/paris-roubaix/1980/result",
+                rider_name="Francesco Moser",
+                expected_rank=1,
+                expected_pcs_points=275,  # User verified: 275 PCS points
+                expected_team="Sanson",  # User verified team
+                test_type="historical",
+                description="Francesco Moser Paris-Roubaix 1980 Winner - 275 PCS points (VERIFIED)"
+            ),
+            
+            # === VERIFIED STAGE WINS ===
+            # 1991 Tour de France Stage 9 - Mauro Ribeiro (FULL DATA)
+            KnownResult(
+                race_url="race/tour-de-france/1991/stage-9",
+                rider_name="Mauro Ribeiro",
+                expected_rank=1,
+                expected_pcs_points=100,  # User verified: 100 PCS points for stage
+                expected_team="R.M.O.",  # User verified team
+                expected_avg_speed=43.74,  # User verified: 43.74 kph
+                expected_won_how="Spring of small group",  # User verified: Won in a Spring of small group
+                expected_startlist_quality=1933,  # User verified: startlist quality score 1933
+                expected_distance=161.0,  # User verified: 161km distance
+                expected_elevation=1679,  # User verified: 1679m vertical
+                expected_profile_score=29,  # User verified: profile score 29
+                test_type="stage",
+                description="Mauro Ribeiro TDF 1991 Stage 9 Winner - FULL DATA (VERIFIED)"
+            ),
+            
+            # 2016 Tour de France Stage 14 - Mark Cavendish (FULL DATA)
+            KnownResult(
+                race_url="race/tour-de-france/2016/stage-14",
+                rider_name="Mark Cavendish",
+                expected_rank=1,
+                expected_uci_points=120,  # User verified: 120 UCI points
+                expected_pcs_points=100,  # User verified: 100 PCS points
+                expected_avg_speed=36.39,  # User verified: 36.39 kph
+                expected_distance=208.5,  # User verified: 208.5km distance
+                expected_elevation=1958,  # User verified: 1958m vertical
+                expected_profile_score=30,  # User verified: profile score 30
+                test_type="stage",
+                description="Mark Cavendish TDF 2016 Stage 14 Winner - FULL DATA (VERIFIED)"
+            ),
+            
+            # 2022 Tour de France Stage 12 - Tom Pidcock (MOUNTAIN STAGE)
+            KnownResult(
+                race_url="race/tour-de-france/2022/stage-12",
+                rider_name="Tom Pidcock",
+                expected_rank=1,
+                expected_distance=165.1,  # User verified: 165.1km distance
+                expected_avg_speed=33.534,  # User verified: 33.534 kph
+                expected_elevation=4660,  # User verified: 4660m vertical
+                expected_profile_score=389,  # User verified: profile score 389
+                expected_won_how="11 km solo",  # User verified: won how is 11 km solo
+                test_type="stage",
+                description="Tom Pidcock TDF 2022 Stage 12 Winner - Mountain stage, 11km solo (VERIFIED)"
+            ),
+            
+            # === VERIFIED CLASSICS ===
+            # 2015 Amstel Gold Race - Michał Kwiatkowski
+            KnownResult(
+                race_url="race/amstel-gold-race/2015/result",
+                rider_name="Michał Kwiatkowski",
+                expected_rank=1,
+                expected_uci_points=80,  # User verified: 80 UCI points
+                expected_pcs_points=225,  # User verified: 225 PCS points
+                expected_won_how="Sprint of a small group",  # User verified: Sprint of a small group
+                expected_distance=258.0,  # User verified: 258km distance
+                expected_elevation=3558,  # User verified: 3558m vertical
+                test_type="general",
+                description="Michał Kwiatkowski Amstel Gold 2015 Winner - Sprint of small group (VERIFIED)"
+            )
+        ]
         
         # Define comprehensive test races covering different scenarios
         self.test_races = [
@@ -145,7 +275,10 @@ class ScraperTestFramework:
                 # Test 3: Data validation tests
                 await self._test_data_validation(scraper)
                 
-                # Test 4: Format consistency tests
+                # Test 4: Known result accuracy tests
+                await self._test_known_results(scraper)
+                
+                # Test 5: Format consistency tests
                 await self._test_format_consistency(scraper)
                 
         except Exception as e:
@@ -395,6 +528,45 @@ class ScraperTestFramework:
                             expected_vs_actual={"duplicates": duplicates}
                         )
                     )
+                
+                # Enhanced UCI points validation
+                uci_points_with_values = [r.get('uci_points', 0) for r in results if r.get('uci_points', 0) > 0]
+                if len(uci_points_with_values) > 0:
+                    # Check if UCI points follow expected patterns
+                    winner_points = results[0].get('uci_points', 0) if results else 0
+                    if winner_points > 0:
+                        # Winner should have the highest UCI points (or tied for highest)
+                        max_points = max(uci_points_with_values)
+                        if winner_points != max_points:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="data_validation",
+                                    url=test_url,
+                                    error_type="uci_points_logic_error",
+                                    error_message="Winner doesn't have highest UCI points",
+                                    expected_vs_actual={
+                                        "winner_points": winner_points,
+                                        "max_points": max_points,
+                                        "winner_name": results[0].get('rider_name', 'Unknown')
+                                    }
+                                )
+                            )
+                
+                # Check for reasonable UCI points ranges
+                if uci_points_with_values:
+                    max_points = max(uci_points_with_values)
+                    # Grand Tour winners get 1300, Monument winners get 500, Stage wins get 120
+                    # Anything above 1300 is unrealistic
+                    if max_points > 1300:  # No race should give more than 1300 UCI points
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="data_validation",
+                                url=test_url,
+                                error_type="unrealistic_uci_points",
+                                error_message=f"Unrealistically high UCI points detected: {max_points}",
+                                expected_vs_actual={"max_points": max_points, "reasonable_max": 1300}
+                            )
+                        )
             
             execution_time = (datetime.now() - test_start).total_seconds()
             validation_errors_count = len([e for e in self.validation_errors if e.stage == "data_validation"])
@@ -414,6 +586,380 @@ class ScraperTestFramework:
                 error=str(e),
                 execution_time=execution_time
             ))
+    
+    async def _test_known_results(self, scraper: AsyncCyclingDataScraper):
+        """Test specific known results for data accuracy"""
+        logger.info("🎯 Testing known result accuracy...")
+        
+        for known_result in self.known_results:
+            test_start = datetime.now()
+            test_name = f"known_result_{known_result.rider_name.replace(' ', '_').lower()}"
+            
+            try:
+                logger.info(f"   Testing: {known_result.description}")
+                
+                # Get stage info for the known result
+                stage_info = await scraper.get_stage_info(known_result.race_url)
+                
+                if not stage_info or not stage_info.get('results'):
+                    raise Exception(f"Failed to get results for {known_result.race_url}")
+                
+                results = stage_info['results']
+                
+                # Find the rider in results
+                rider_result = None
+                for result in results:
+                    if result.get('rider_name', '').lower() == known_result.rider_name.lower():
+                        rider_result = result
+                        break
+                
+                if not rider_result:
+                    # Try partial name matching
+                    for result in results:
+                        rider_name = result.get('rider_name', '').lower()
+                        known_name = known_result.rider_name.lower()
+                        if any(part in rider_name for part in known_name.split()):
+                            rider_result = result
+                            break
+                
+                execution_time = (datetime.now() - test_start).total_seconds()
+                
+                if not rider_result:
+                    self.validation_errors.append(
+                        ScrapingValidationError(
+                            stage="known_results",
+                            url=known_result.race_url,
+                            error_type="rider_not_found",
+                            error_message=f"Rider '{known_result.rider_name}' not found in results",
+                            expected_vs_actual={
+                                "expected_rider": known_result.rider_name,
+                                "available_riders": [r.get('rider_name') for r in results[:10]]
+                            }
+                        )
+                    )
+                    self.test_results.append(TestResult(
+                        test_name=test_name,
+                        passed=False,
+                        error=f"Rider '{known_result.rider_name}' not found",
+                        execution_time=execution_time
+                    ))
+                    continue
+                
+                # Validate rank
+                actual_rank = rider_result.get('rank')
+                rank_correct = actual_rank == known_result.expected_rank
+                
+                # Validate UCI points if expected
+                uci_points_correct = True
+                if known_result.expected_uci_points is not None:
+                    actual_uci_points = rider_result.get('uci_points', 0)
+                    uci_points_correct = actual_uci_points == known_result.expected_uci_points
+                    
+                    if not uci_points_correct:
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="known_results",
+                                url=known_result.race_url,
+                                error_type="uci_points_mismatch",
+                                error_message=f"UCI points mismatch for {known_result.rider_name} ({known_result.test_type})",
+                                expected_vs_actual={
+                                    "test_type": known_result.test_type,
+                                    "expected_uci_points": known_result.expected_uci_points,
+                                    "actual_uci_points": actual_uci_points,
+                                    "expected_rank": known_result.expected_rank,
+                                    "actual_rank": actual_rank
+                                }
+                            )
+                        )
+                
+                # Validate PCS points if expected
+                pcs_points_correct = True
+                if known_result.expected_pcs_points is not None:
+                    actual_pcs_points = rider_result.get('pcs_points', 0)
+                    pcs_points_correct = actual_pcs_points == known_result.expected_pcs_points
+                    
+                    if not pcs_points_correct:
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="known_results",
+                                url=known_result.race_url,
+                                error_type="pcs_points_mismatch",
+                                error_message=f"PCS points mismatch for {known_result.rider_name} ({known_result.test_type})",
+                                expected_vs_actual={
+                                    "test_type": known_result.test_type,
+                                    "expected_pcs_points": known_result.expected_pcs_points,
+                                    "actual_pcs_points": actual_pcs_points,
+                                    "expected_rank": known_result.expected_rank,
+                                    "actual_rank": actual_rank
+                                }
+                            )
+                        )
+                
+                # Validate team if expected
+                team_correct = True
+                if known_result.expected_team is not None:
+                    actual_team = rider_result.get('team_name', '')
+                    # Flexible team matching (handles slight name variations)
+                    if actual_team and known_result.expected_team:
+                        team_correct = (known_result.expected_team.lower() in actual_team.lower() or 
+                                      actual_team.lower() in known_result.expected_team.lower())
+                    else:
+                        team_correct = False
+                    
+                    if not team_correct:
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="known_results",
+                                url=known_result.race_url,
+                                error_type="team_mismatch",
+                                error_message=f"Team mismatch for {known_result.rider_name}",
+                                expected_vs_actual={
+                                    "expected_team": known_result.expected_team,
+                                    "actual_team": actual_team,
+                                    "rider_name": known_result.rider_name
+                                }
+                            )
+                        )
+                
+                # Validate age if expected
+                age_correct = True
+                if known_result.expected_age is not None:
+                    actual_age = rider_result.get('age')
+                    if actual_age is not None:
+                        # Allow +/- 1 year difference (races can be at different times of year)
+                        age_correct = abs(actual_age - known_result.expected_age) <= 1
+                        
+                        if not age_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="age_mismatch",
+                                    error_message=f"Age mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_age": known_result.expected_age,
+                                        "actual_age": actual_age,
+                                        "rider_name": known_result.rider_name
+                                    }
+                                )
+                            )
+                
+                # Validate average speed if expected
+                avg_speed_correct = True
+                if known_result.expected_avg_speed is not None:
+                    actual_avg_speed = rider_result.get('avg_speed') or stage_info.get('avg_speed_winner')
+                    if actual_avg_speed is not None:
+                        # Allow small tolerance for speed calculations
+                        speed_diff = abs(float(actual_avg_speed) - known_result.expected_avg_speed)
+                        avg_speed_correct = speed_diff <= 0.1  # ±0.1 kph tolerance
+                        
+                        if not avg_speed_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="avg_speed_mismatch",
+                                    error_message=f"Average speed mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_avg_speed": known_result.expected_avg_speed,
+                                        "actual_avg_speed": actual_avg_speed,
+                                        "difference": speed_diff
+                                    }
+                                )
+                            )
+                
+                # Validate "won how" if expected
+                won_how_correct = True
+                if known_result.expected_won_how is not None:
+                    actual_won_how = rider_result.get('won_how') or stage_info.get('won_how', '')
+                    # Flexible matching for "won how" descriptions
+                    if actual_won_how and known_result.expected_won_how:
+                        # Normalize both strings for comparison
+                        expected_normalized = known_result.expected_won_how.lower().replace('spring', 'sprint').replace(' a ', ' ')
+                        actual_normalized = actual_won_how.lower().replace('spring', 'sprint').replace(' a ', ' ')
+                        won_how_correct = (expected_normalized in actual_normalized or
+                                         actual_normalized in expected_normalized)
+                    else:
+                        won_how_correct = False
+                    
+                    if not won_how_correct:
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="known_results",
+                                url=known_result.race_url,
+                                error_type="won_how_mismatch",
+                                error_message=f"'Won how' mismatch for {known_result.rider_name}",
+                                expected_vs_actual={
+                                    "expected_won_how": known_result.expected_won_how,
+                                    "actual_won_how": actual_won_how
+                                }
+                            )
+                        )
+                
+                # Validate startlist quality if expected
+                startlist_quality_correct = True
+                if known_result.expected_startlist_quality is not None:
+                    actual_startlist_quality = stage_info.get('race_startlist_quality_score')
+                    if actual_startlist_quality is not None:
+                        startlist_quality_correct = int(actual_startlist_quality) == known_result.expected_startlist_quality
+                        
+                        if not startlist_quality_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="startlist_quality_mismatch",
+                                    error_message=f"Startlist quality mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_startlist_quality": known_result.expected_startlist_quality,
+                                        "actual_startlist_quality": actual_startlist_quality
+                                    }
+                                )
+                            )
+                
+                # Validate distance if expected
+                distance_correct = True
+                if known_result.expected_distance is not None:
+                    actual_distance = stage_info.get('distance')
+                    if actual_distance is not None:
+                        # Allow small tolerance for distance
+                        distance_diff = abs(float(actual_distance) - known_result.expected_distance)
+                        distance_correct = distance_diff <= 0.5  # ±0.5 km tolerance
+                        
+                        if not distance_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="distance_mismatch",
+                                    error_message=f"Distance mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_distance": known_result.expected_distance,
+                                        "actual_distance": actual_distance,
+                                        "difference": distance_diff
+                                    }
+                                )
+                            )
+                
+                # Validate elevation if expected
+                elevation_correct = True
+                if known_result.expected_elevation is not None:
+                    actual_elevation = stage_info.get('elevation') or stage_info.get('vertical_meters')
+                    if actual_elevation is not None:
+                        elevation_correct = int(actual_elevation) == known_result.expected_elevation
+                        
+                        if not elevation_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="elevation_mismatch",
+                                    error_message=f"Elevation mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_elevation": known_result.expected_elevation,
+                                        "actual_elevation": actual_elevation
+                                    }
+                                )
+                            )
+                
+                # Validate profile score if expected
+                profile_score_correct = True
+                if known_result.expected_profile_score is not None:
+                    actual_profile_score = stage_info.get('profile_score')
+                    if actual_profile_score is not None:
+                        profile_score_correct = int(actual_profile_score) == known_result.expected_profile_score
+                        
+                        if not profile_score_correct:
+                            self.validation_errors.append(
+                                ScrapingValidationError(
+                                    stage="known_results",
+                                    url=known_result.race_url,
+                                    error_type="profile_score_mismatch",
+                                    error_message=f"Profile score mismatch for {known_result.rider_name}",
+                                    expected_vs_actual={
+                                        "expected_profile_score": known_result.expected_profile_score,
+                                        "actual_profile_score": actual_profile_score
+                                    }
+                                )
+                            )
+                
+                if not rank_correct:
+                    self.validation_errors.append(
+                        ScrapingValidationError(
+                            stage="known_results",
+                            url=known_result.race_url,
+                            error_type="rank_mismatch",
+                            error_message=f"Rank mismatch for {known_result.rider_name}",
+                            expected_vs_actual={
+                                "expected_rank": known_result.expected_rank,
+                                "actual_rank": actual_rank,
+                                "rider_data": rider_result
+                            }
+                        )
+                    )
+                
+                test_passed = (rank_correct and uci_points_correct and pcs_points_correct and 
+                             team_correct and age_correct and avg_speed_correct and won_how_correct and
+                             startlist_quality_correct and distance_correct and elevation_correct and
+                             profile_score_correct)
+                
+                self.test_results.append(TestResult(
+                    test_name=test_name,
+                    passed=test_passed,
+                    details={
+                        "rider_name": known_result.rider_name,
+                        "test_type": known_result.test_type,
+                        "expected_rank": known_result.expected_rank,
+                        "actual_rank": actual_rank,
+                        "expected_uci_points": known_result.expected_uci_points,
+                        "actual_uci_points": rider_result.get('uci_points', 0),
+                        "expected_pcs_points": known_result.expected_pcs_points,
+                        "actual_pcs_points": rider_result.get('pcs_points', 0),
+                        "expected_team": known_result.expected_team,
+                        "actual_team": rider_result.get('team_name', ''),
+                        "expected_age": known_result.expected_age,
+                        "actual_age": rider_result.get('age'),
+                        "expected_time_gap": known_result.expected_time_gap,
+                        "actual_time_gap": rider_result.get('time', ''),
+                        "expected_avg_speed": known_result.expected_avg_speed,
+                        "actual_avg_speed": rider_result.get('avg_speed') or stage_info.get('avg_speed_winner'),
+                        "expected_won_how": known_result.expected_won_how,
+                        "actual_won_how": rider_result.get('won_how') or stage_info.get('won_how'),
+                        "expected_startlist_quality": known_result.expected_startlist_quality,
+                        "actual_startlist_quality": stage_info.get('race_startlist_quality_score'),
+                        "expected_distance": known_result.expected_distance,
+                        "actual_distance": stage_info.get('distance'),
+                        "expected_elevation": known_result.expected_elevation,
+                        "actual_elevation": stage_info.get('elevation') or stage_info.get('vertical_meters'),
+                        "expected_profile_score": known_result.expected_profile_score,
+                        "actual_profile_score": stage_info.get('profile_score'),
+                        "race_url": known_result.race_url
+                    },
+                    execution_time=execution_time
+                ))
+                
+                if test_passed:
+                    logger.info(f"     ✅ {known_result.description} - CORRECT")
+                else:
+                    logger.warning(f"     ❌ {known_result.description} - INCORRECT")
+                    
+            except Exception as e:
+                execution_time = (datetime.now() - test_start).total_seconds()
+                self.validation_errors.append(
+                    ScrapingValidationError(
+                        stage="known_results",
+                        url=known_result.race_url,
+                        error_type="test_failure",
+                        error_message=str(e)
+                    )
+                )
+                self.test_results.append(TestResult(
+                    test_name=test_name,
+                    passed=False,
+                    error=str(e),
+                    execution_time=execution_time
+                ))
+                logger.error(f"     💥 {known_result.description} - ERROR: {e}")
     
     async def _test_format_consistency(self, scraper: AsyncCyclingDataScraper):
         """Test format consistency across different years"""

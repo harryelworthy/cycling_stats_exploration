@@ -447,41 +447,126 @@ class AsyncCyclingDataScraper:
                 'youth': []
             }
             
-            # Extract stage details from infolist
-            infolist = soup.find('ul', class_='infolist')
-            if infolist:
-                for li in infolist.find_all('li'):
-                    text = li.get_text(strip=True)
-                    if 'km' in text.lower() and 'distance' in text.lower():
-                        try:
-                            distance_str = ''.join(filter(str.isdigit, text.split('km')[0]))
-                            if distance_str:
-                                stage_info['distance'] = float(distance_str)
-                        except:
-                            pass
-                    elif 'date' in text.lower():
-                        stage_info['date'] = text.split(':')[-1].strip() if ':' in text else text
+            # Extract stage details from keyvalueList (the actual structure used by the site)
+            keyvalue_list = soup.find('ul', class_='keyvalueList')
+            if keyvalue_list:
+                for li in keyvalue_list.find_all('li'):
+                    title_div = li.find('div', class_='title')
+                    value_div = li.find('div', class_='value')
+                    
+                    if title_div and value_div:
+                        title = title_div.get_text(strip=True).lower()
+                        value = value_div.get_text(strip=True)
+                        
+                        # Extract distance
+                        if 'distance' in title:
+                            try:
+                                # Extract numeric value from "165.1 km"
+                                distance_str = ''.join(c for c in value if c.isdigit() or c == '.')
+                                if distance_str:
+                                    stage_info['distance'] = float(distance_str)
+                            except:
+                                pass
+                        
+                        # Extract won how
+                        elif 'won how' in title:
+                            stage_info['won_how'] = value
+                        
+                        # Extract average speed
+                        elif 'avg. speed winner' in title:
+                            try:
+                                # Extract numeric value from "33.534 km/h"
+                                speed_str = ''.join(c for c in value if c.isdigit() or c == '.')
+                                if speed_str:
+                                    stage_info['avg_speed_winner'] = float(speed_str)
+                            except:
+                                pass
+                        
+                        # Extract vertical meters
+                        elif 'vertical meters' in title:
+                            try:
+                                stage_info['vertical_meters'] = int(value)
+                            except:
+                                pass
+                        
+                        # Extract profile score
+                        elif 'profilescore' in title:
+                            try:
+                                stage_info['profile_score'] = int(value)
+                            except:
+                                pass
+                        
+                        # Extract startlist quality score
+                        elif 'startlist quality score' in title:
+                            try:
+                                stage_info['race_startlist_quality_score'] = int(value)
+                            except:
+                                pass
+                        
+                        # Extract date
+                        elif 'date' in title:
+                            stage_info['date'] = value
+                        
+                        # Extract average temperature
+                        elif 'avg. temperature' in title:
+                            try:
+                                # Extract numeric value from "26 °C"
+                                temp_str = ''.join(c for c in value if c.isdigit() or c == '.')
+                                if temp_str:
+                                    stage_info['avg_temperature'] = float(temp_str)
+                            except:
+                                pass
             
-            # Extract results from main results table
-            results_table = soup.find('table', class_='results')
-            if results_table:
-                stage_info['results'] = self.parse_results_table(results_table)
+            # Check if this is a GC page (ends with /gc)
+            is_gc_page = stage_url.endswith('/gc')
+            
+            if is_gc_page:
+                # For GC pages, look for the GC classification table first
+                # The GC table is typically in a div with data-id containing the GC classification
+                gc_tables = soup.find_all('table', class_='results')
+                gc_results = []
+                
+                for table in gc_tables:
+                    # Look for the table that contains GC data (usually has time columns)
+                    table_html = str(table)
+                    if 'time ar' in table_html and 'time_wonlost' in table_html:
+                        # This looks like a GC table with time data
+                        gc_results = self.parse_results_table(table)
+                        break
+                
+                if gc_results:
+                    stage_info['results'] = gc_results
+                    # Also extract other classifications
+                    for classification in ['points', 'kom', 'youth']:
+                        class_table = soup.find('table', {'id': f'{classification}table'})
+                        if class_table:
+                            stage_info[classification] = self.parse_results_table(class_table, secondary=True)
+                else:
+                    # Fallback to main results table if GC table not found
+                    results_table = soup.find('table', class_='results')
+                    if results_table:
+                        stage_info['results'] = self.parse_results_table(results_table)
             else:
-                # Log missing results table as potential issue
-                enhanced_logger.log_scraping_error(
-                    stage="get_stage_info",
-                    url=full_url,
-                    error=ValueError("No results table found"),
-                    html_content=html_content,
-                    expected_elements=['table.results'],
-                    context={'stage_url': stage_url}
-                )
-            
-            # Extract secondary classifications
-            for classification in ['gc', 'points', 'kom', 'youth']:
-                class_table = soup.find('table', {'id': f'{classification}table'})
-                if class_table:
-                    stage_info[classification] = self.parse_results_table(class_table, secondary=True)
+                # For regular stage pages, use the main results table
+                results_table = soup.find('table', class_='results')
+                if results_table:
+                    stage_info['results'] = self.parse_results_table(results_table)
+                else:
+                    # Log missing results table as potential issue
+                    enhanced_logger.log_scraping_error(
+                        stage="get_stage_info",
+                        url=full_url,
+                        error=ValueError("No results table found"),
+                        html_content=html_content,
+                        expected_elements=['table.results'],
+                        context={'stage_url': stage_url}
+                    )
+                
+                # Extract secondary classifications
+                for classification in ['gc', 'points', 'kom', 'youth']:
+                    class_table = soup.find('table', {'id': f'{classification}table'})
+                    if class_table:
+                        stage_info[classification] = self.parse_results_table(class_table, secondary=True)
             
             # Extract year for historical context
             year = None
@@ -555,20 +640,45 @@ class AsyncCyclingDataScraper:
                 # Extract other data based on column headers
                 for i, cell in enumerate(cells):
                     text = cell.get_text(strip=True)
+                    cell_classes = cell.get('class', [])
                     
-                    # Time column
+                    # Time column (look for time format with colons)
                     if ':' in text and ('.' in text or text.count(':') >= 2):
-                        result['time'] = text
+                        # Clean up time format (remove duplicates like "4:434:43")
+                        time_parts = text.split(':')
+                        if len(time_parts) >= 2:
+                            # Take the first part if it looks like a valid time
+                            if len(time_parts[0]) <= 2 and time_parts[0].isdigit():
+                                result['time'] = text.split(':')[0] + ':' + text.split(':')[1]
+                            else:
+                                result['time'] = text
                     
-                    # Points columns
+                    # UCI Points column - specifically look for cells with 'uci_pnt' class
+                    elif 'uci_pnt' in cell_classes and text.isdigit() and int(text) > 0:
+                        result['uci_points'] = int(text)
+                    
+                    # PCS Points column - specifically look for cells with 'pnt' class
+                    elif 'pnt' in cell_classes and text.isdigit() and int(text) > 0:
+                        result['pcs_points'] = int(text)
+                    
+                    # Points columns - for other tables or fallback
                     elif text.isdigit() and int(text) > 0:
-                        if not secondary:
-                            if 'uci_points' not in result:
+                        # Don't assign rank numbers as points
+                        if int(text) != result.get('rank'):
+                            if not secondary:
+                                # For GC tables, look for the points column specifically
+                                # The points column is typically the one with moderate numbers (not too high, not too low)
+                                if 'pcs_points' not in result:
+                                    # Only assign as PCS points if it's a reasonable value (not age, not bib number, etc.)
+                                    if 10 <= int(text) <= 500:  # PCS points are typically in this range
+                                        result['pcs_points'] = int(text)
+                                # UCI points are typically not shown in older GC tables
+                                # Only assign if we're confident it's UCI points (very high values)
+                                elif 'uci_points' not in result and int(text) > 500:  # UCI points are typically much higher
+                                    result['uci_points'] = int(text)
+                            else:
+                                # For secondary classifications, this is UCI points
                                 result['uci_points'] = int(text)
-                            elif 'pcs_points' not in result:
-                                result['pcs_points'] = int(text)
-                        else:
-                            result['uci_points'] = int(text)
                     
                     # Age column (typically 2-digit number)
                     elif text.isdigit() and 18 <= int(text) <= 50:

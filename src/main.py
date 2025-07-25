@@ -327,8 +327,7 @@ async def main():
             if hasattr(progress_tracker, 'get_status_report'):
                 final_report = await progress_tracker.get_status_report(args.years)
                 print(final_report)
-        
-    except KeyboardInterrupt:
+        except KeyboardInterrupt:
         logger.info("🛑 Scraping interrupted by user")
         logger.info("💾 Progress has been saved - use --resume to continue")
         report = await progress_tracker.get_status_report(args.years)
