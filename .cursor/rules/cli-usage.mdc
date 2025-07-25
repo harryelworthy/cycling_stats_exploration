@@ -1,0 +1,60 @@
+# CLI Usage Patterns
+
+## Standard Commands
+
+### Race Scraping
+```bash
+# Standard race scraping for specific years
+python src/main.py 2023 2024
+
+# With rider profiles enabled
+python src/main.py 2023 2024 --enable-rider-scraping
+
+# Scrape specific race
+python src/main.py --race "tour-de-france" --year 2024
+```
+
+### Rider Profile Management
+```bash
+# Update all missing rider profiles
+python src/update_riders.py --all-missing
+
+# Update specific rider
+python src/update_riders.py --rider "tadej-pogacar"
+
+# Update riders from recent races
+python src/update_riders.py --from-races 2024
+```
+
+### Testing and Validation
+```bash
+# Run comprehensive test suite
+python src/run_tests.py
+
+# Test specific components
+python src/test_scraper.py --test-races
+python src/test_scraper.py --test-riders
+python src/test_scraper.py --test-database
+```
+
+### Progress and Recovery
+```bash
+# Resume interrupted scraping job
+python src/main.py 2023 2024 --resume
+
+# Check progress status
+python src/progress_tracker.py --status
+
+# Clear progress and start fresh
+python src/progress_tracker.py --clear
+```
+
+## Key Entry Points
+- [src/main.py](mdc:src/main.py) - Primary CLI interface for race scraping
+- [src/update_riders.py](mdc:src/update_riders.py) - Standalone rider data updater
+- [src/run_tests.py](mdc:src/run_tests.py) - Testing framework execution
+- [src/scraper_cli.py](mdc:src/scraper_cli.py) - Alternative CLI interface
+description:
+globs:
+alwaysApply: false
+---

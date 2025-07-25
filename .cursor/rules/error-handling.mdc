@@ -1,0 +1,41 @@
+# Error Handling and Logging
+
+## Logging Architecture
+- **Enhanced Logger**: [src/enhanced_error_logger.py](mdc:src/enhanced_error_logger.py) - Centralized logging system
+- **Log Directory**: `logs/` - All log files stored here
+- **Error Tracking**: Comprehensive error categorization and reporting
+
+## Error Handling Patterns
+- **Graceful degradation** for network failures
+- **Retry logic** with exponential backoff
+- **Detailed error logging** with context preservation
+- **Progress checkpointing** to enable resume capability
+
+## Common Error Scenarios
+- **Network timeouts** - Automatic retry with increasing delays
+- **Rate limiting** - Respectful backoff and queue management
+- **Data format changes** - Validation and fallback parsing
+- **Database constraints** - Transaction rollback and recovery
+
+## Logging Levels
+- **DEBUG** - Detailed scraping operations
+- **INFO** - Progress updates and milestones
+- **WARNING** - Recoverable issues (retries, fallbacks)
+- **ERROR** - Failed operations requiring attention
+- **CRITICAL** - System-level failures
+
+## Error Recovery
+- **Automatic retries** for transient failures
+- **Progress persistence** for long-running jobs
+- **Data validation** before database insertion
+- **Rollback mechanisms** for failed transactions
+
+## Monitoring and Alerts
+- **Progress tracking** via [src/progress_tracker.py](mdc:src/progress_tracker.py)
+- **Performance metrics** collection
+- **Error rate monitoring** and alerting
+- **Data quality validation** and reporting
+description:
+globs:
+alwaysApply: false
+---

@@ -1,0 +1,34 @@
+# Python Coding Standards
+
+## Code Standards
+- **Async/await** for all HTTP operations
+- **Conservative rate limiting**: 30 concurrent for races, 5 for riders
+- **Request delays**: 0.1s for races, 0.2s for riders
+- **Robust error handling** with detailed logging
+- **Progress tracking** for resume capability
+- **Type hints** for all public APIs
+
+## Development Workflow
+1. **Run tests first**: `python src/run_tests.py`
+2. **Check existing functionality** before adding features
+3. **Follow existing patterns** in [src/async_scraper.py](mdc:src/async_scraper.py) and [src/rider_scraper.py](mdc:src/rider_scraper.py)
+4. **Update documentation** for new features
+5. **Test with small datasets** before large scraping jobs
+
+## Performance Considerations
+- **Long-running jobs**: Use progress tracking and resume capability
+- **Database size**: Can reach GB scale for comprehensive datasets
+- **Memory usage**: Batch processing prevents memory bloat
+- **Network respect**: Built-in rate limiting and retry logic
+
+## ProCyclingStats.com Specifics
+- **Respectful scraping**: Conservative concurrent requests and delays
+- **Race URLs**: `/race/race-name/year/result` pattern
+- **Rider URLs**: `/rider/rider-name` pattern
+- **Multi-stage races**: Each stage has separate URL and results
+- **Data quality**: Modern data (2000+) is comprehensive, older data varies
+- **Format changes**: Use test framework to detect and handle
+description:
+globs:
+alwaysApply: false
+---
