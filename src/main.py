@@ -328,21 +328,21 @@ async def main():
                 final_report = await progress_tracker.get_status_report(args.years)
                 print(final_report)
         except KeyboardInterrupt:
-        logger.info("🛑 Scraping interrupted by user")
-        logger.info("💾 Progress has been saved - use --resume to continue")
-        report = await progress_tracker.get_status_report(args.years)
-        print(report)
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"💥 Scraping failed: {e}")
-        logger.error("💾 Progress has been saved - check logs and use --resume to continue")
-        logger.error("💡 Try running with --test-only to diagnose issues")
-        
-        # Save failure info
-        if remaining_years:
-            await progress_tracker.mark_year_failed(remaining_years[0], str(e))
-        
-        sys.exit(1)
+            logger.info("🛑 Scraping interrupted by user")
+            logger.info("💾 Progress has been saved - use --resume to continue")
+            report = await progress_tracker.get_status_report(args.years)
+            print(report)
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"💥 Scraping failed: {e}")
+            logger.error("💾 Progress has been saved - check logs and use --resume to continue")
+            logger.error("💡 Try running with --test-only to diagnose issues")
+            
+            # Save failure info
+            if remaining_years:
+                await progress_tracker.mark_year_failed(remaining_years[0], str(e))
+            
+            sys.exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main()) 

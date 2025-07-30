@@ -517,32 +517,65 @@ class AsyncCyclingDataScraper:
                             except:
                                 pass
             
-            # Check if this is a GC page (ends with /gc)
+            # Check if this is a jersey classification page
             is_gc_page = stage_url.endswith('/gc')
+            is_points_page = stage_url.endswith('/points')
+            is_kom_page = stage_url.endswith('/kom')
+            is_youth_page = stage_url.endswith('/youth')
+            is_jersey_page = is_gc_page or is_points_page or is_kom_page or is_youth_page
             
-            if is_gc_page:
-                # For GC pages, look for the GC classification table first
-                # The GC table is typically in a div with data-id containing the GC classification
-                gc_tables = soup.find_all('table', class_='results')
-                gc_results = []
+            if is_jersey_page:
+                # For jersey classification pages, look for the specific classification table
+                classification_type = None
+                if is_gc_page:
+                    classification_type = 'gc'
+                elif is_points_page:
+                    classification_type = 'points'
+                elif is_kom_page:
+                    classification_type = 'kom'
+                elif is_youth_page:
+                    classification_type = 'youth'
                 
-                for table in gc_tables:
-                    # Look for the table that contains GC data (usually has time columns)
-                    table_html = str(table)
-                    if 'time ar' in table_html and 'time_wonlost' in table_html:
-                        # This looks like a GC table with time data
-                        gc_results = self.parse_results_table(table)
-                        break
+                # Look for the main classification table
+                classification_results = []
+                results_tables = soup.find_all('table', class_='results')
                 
-                if gc_results:
-                    stage_info['results'] = gc_results
-                    # Also extract other classifications
-                    for classification in ['points', 'kom', 'youth']:
-                        class_table = soup.find('table', {'id': f'{classification}table'})
-                        if class_table:
-                            stage_info[classification] = self.parse_results_table(class_table, secondary=True)
+                if results_tables:
+                    # For jersey classification pages, the tables are typically ordered as:
+                    # Table 0: Stage result
+                    # Table 1: GC classification  
+                    # Table 2: Points classification
+                    # Table 3: KOM classification
+                    # Table 4: Youth classification
+                    
+                    table_index = 0  # Default to first table
+                    
+                    if classification_type == 'gc' and len(results_tables) >= 2:
+                        table_index = 1  # GC is typically second table
+                    elif classification_type == 'points' and len(results_tables) >= 3:
+                        table_index = 2  # Points is typically third table
+                    elif classification_type == 'kom' and len(results_tables) >= 4:
+                        table_index = 3  # KOM is typically fourth table
+                    elif classification_type == 'youth' and len(results_tables) >= 5:
+                        table_index = 4  # Youth is typically fifth table
+                    
+                    # Ensure we don't go out of bounds
+                    if table_index < len(results_tables):
+                        classification_results = self.parse_results_table(results_tables[table_index])
+                    else:
+                        # Fallback to first table if target table doesn't exist
+                        classification_results = self.parse_results_table(results_tables[0])
+                
+                if classification_results:
+                    stage_info['results'] = classification_results
+                    # Also extract other classifications if available
+                    for other_classification in ['gc', 'points', 'kom', 'youth']:
+                        if other_classification != classification_type:
+                            class_table = soup.find('table', {'id': f'{other_classification}table'})
+                            if class_table:
+                                stage_info[other_classification] = self.parse_results_table(class_table, secondary=True)
                 else:
-                    # Fallback to main results table if GC table not found
+                    # Fallback to main results table if classification table not found
                     results_table = soup.find('table', class_='results')
                     if results_table:
                         stage_info['results'] = self.parse_results_table(results_table)

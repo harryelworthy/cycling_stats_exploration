@@ -109,6 +109,10 @@ async def run_accuracy_tests():
                         actual_profile = test.details.get('actual_profile_score')
                         if expected_profile:
                             print(f"     Expected profile score: {expected_profile}, Got: {actual_profile}")
+                        
+                        jersey_type = test.details.get('jersey_type')
+                        if jersey_type:
+                            print(f"     Jersey type: {jersey_type.upper()} classification")
         
         # Print validation errors for known results
         known_errors = [e for e in framework.validation_errors if e.stage == "known_results"]

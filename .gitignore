@@ -42,6 +42,7 @@ Thumbs.db
 data/
 *.db
 test_*.db
+debug_*.db
 
 # R files
 *.RData
@@ -55,9 +56,14 @@ logs/
 temp/
 tmp/
 
-# Reports (keep structure but ignore content)
+# Test reports and summaries (ignore all test outputs)
 reports/*.json
 reports/*.txt
+src/reports/*.json
+src/reports/*.txt
+
+# Test databases
+test_cycling_data.db
 
 # Jupyter
 .ipynb_checkpoints/

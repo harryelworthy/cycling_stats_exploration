@@ -50,8 +50,9 @@ class KnownResult:
     expected_distance: Optional[float] = None  # e.g., 161.0 km
     expected_elevation: Optional[int] = None  # e.g., 1679 m
     expected_profile_score: Optional[int] = None  # e.g., 29
+    jersey_type: Optional[str] = None  # 'gc', 'points', 'kom', 'youth' for jersey standings
     description: str = ""
-    test_type: str = "general"  # 'gc', 'stage', 'general', 'historical'
+    test_type: str = "general"  # 'gc', 'stage', 'general', 'historical', 'jersey'
 
 @dataclass
 class TestResult:
@@ -191,6 +192,57 @@ class ScraperTestFramework:
                 expected_elevation=3558,  # User verified: 3558m vertical
                 test_type="general",
                 description="Michał Kwiatkowski Amstel Gold 2015 Winner - Sprint of small group (VERIFIED)"
+            ),
+            
+            # === VERIFIED JERSEY STANDINGS ===
+            # TDF 2018 Stage 4 - GC Leader Greg van Avermaet
+            KnownResult(
+                race_url="race/tour-de-france/2018/stage-4/gc",
+                rider_name="Greg van Avermaet",
+                expected_rank=1,
+                jersey_type="gc",
+                test_type="jersey",
+                description="Greg van Avermaet TDF 2018 Stage 4 - GC Leader (Yellow Jersey) (VERIFIED)"
+            ),
+            
+            # TDF 2018 Stage 4 - Points Leader Peter Sagan
+            KnownResult(
+                race_url="race/tour-de-france/2018/stage-4/points",
+                rider_name="Peter Sagan",
+                expected_rank=1,
+                jersey_type="points",
+                test_type="jersey",
+                description="Peter Sagan TDF 2018 Stage 4 - Points Leader (Green Jersey) (VERIFIED)"
+            ),
+            
+            # TDF 2018 Stage 4 - KOM Leader Van Keirsbulck (corrected from Dion Smith)
+            KnownResult(
+                race_url="race/tour-de-france/2018/stage-4/kom",
+                rider_name="Van Keirsbulck",
+                expected_rank=1,
+                jersey_type="kom",
+                test_type="jersey",
+                description="Van Keirsbulck TDF 2018 Stage 4 - KOM Leader (Polka Dot Jersey) (CORRECTED)"
+            ),
+            
+            # Tour de Suisse 2012 - GC Leader Rui Costa
+            KnownResult(
+                race_url="race/tour-de-suisse/2012/gc",
+                rider_name="Rui Costa",
+                expected_rank=1,
+                jersey_type="gc",
+                test_type="jersey",
+                description="Rui Costa Tour de Suisse 2012 - GC Leader (VERIFIED)"
+            ),
+            
+            # Tour de Suisse 2012 - KOM Leader Montaguti (corrected from Frank Schleck)
+            KnownResult(
+                race_url="race/tour-de-suisse/2012/kom",
+                rider_name="Montaguti",
+                expected_rank=1,
+                jersey_type="kom",
+                test_type="jersey",
+                description="Montaguti Tour de Suisse 2012 - KOM Leader (CORRECTED)"
             )
         ]
         
@@ -614,11 +666,37 @@ class ScraperTestFramework:
                         break
                 
                 if not rider_result:
-                    # Try partial name matching
+                    # Try enhanced name matching for different name formats
                     for result in results:
                         rider_name = result.get('rider_name', '').lower()
                         known_name = known_result.rider_name.lower()
-                        if any(part in rider_name for part in known_name.split()):
+                        
+                        # Direct match
+                        if rider_name == known_name:
+                            rider_result = result
+                            break
+                        
+                        # Split name matching (handles "SaganPeter" vs "Peter Sagan")
+                        known_parts = known_name.split()
+                        rider_parts = rider_name.split()
+                        
+                        # Check if all parts of known name are in rider name
+                        if len(known_parts) >= 2:
+                            # For "Peter Sagan" vs "SaganPeter", check if both "peter" and "sagan" are in the rider name
+                            if all(part in rider_name for part in known_parts):
+                                rider_result = result
+                                break
+                        
+                        # Reverse name matching (handles "SchleckFränk" vs "Frank Schleck")
+                        if len(known_parts) >= 2:
+                            # Try reversed order
+                            reversed_known = ' '.join(reversed(known_parts))
+                            if reversed_known in rider_name:
+                                rider_result = result
+                                break
+                        
+                        # Partial matching as fallback
+                        if any(part in rider_name for part in known_parts):
                             rider_result = result
                             break
                 
@@ -933,6 +1011,7 @@ class ScraperTestFramework:
                         "actual_elevation": stage_info.get('elevation') or stage_info.get('vertical_meters'),
                         "expected_profile_score": known_result.expected_profile_score,
                         "actual_profile_score": stage_info.get('profile_score'),
+                        "jersey_type": known_result.jersey_type,
                         "race_url": known_result.race_url
                     },
                     execution_time=execution_time
