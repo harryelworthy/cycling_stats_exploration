@@ -70,8 +70,9 @@ python src/scraper_cli.py status
 
 ## Documentation
 
-- **[TESTING.md](TESTING.md)** - Testing framework and validation
-- **[docs/RIDER_SCRAPING.md](docs/RIDER_SCRAPING.md)** - Complete guide to rider profile scraping
+- **[docs/guides/TESTING.md](docs/guides/TESTING.md)** - Testing framework and validation
+- **[docs/guides/RIDER_SCRAPING.md](docs/guides/RIDER_SCRAPING.md)** - Complete guide to rider profile scraping
+- **[docs/archive/](docs/archive/)** - Historical documentation and development notes
 
 ## Project Structure
 
@@ -86,13 +87,19 @@ cycling_stats_exploration/
 │   ├── progress_tracker.py # Progress tracking
 │   ├── utils.py           # Utility functions
 │   └── models.py          # Data models
-├── docs/                  # Additional documentation
-│   ├── RIDER_SCRAPING.md  # Rider profile scraping guide
-│   └── CLEANUP_NOTES.md   # Repository cleanup notes
+├── docs/                  # Documentation
+│   ├── guides/            # User guides
+│   │   ├── TESTING.md     # Testing framework guide
+│   │   └── RIDER_SCRAPING.md # Rider profile scraping guide
+│   └── archive/           # Historical documentation
+│       ├── FINAL_SOLUTION_SUMMARY.md # Project completion summary
+│       ├── IMPROVEMENTS_SUMMARY.md   # Feature improvements log
+│       └── SCRAPING_ANALYSIS_2024.md # 2024 data analysis
 ├── data/                  # Database and data files
-├── logs/                  # Log files
-├── reports/               # Test and scraping reports
-├── TESTING.md             # Testing framework guide
+│   ├── cycling_data.db    # Main database
+│   └── backups/           # Database backups (kept minimal)
+├── logs/                  # Log files (cleaned regularly)
+├── reports/               # Test and scraping reports (kept minimal)
 ├── requirements.txt       # Python dependencies
 └── README.md             # This file
 ```
