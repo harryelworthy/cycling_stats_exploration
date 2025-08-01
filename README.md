@@ -1,4 +1,4 @@
-# Cycling Stats Exploration
+# PC Puller
 
 A comprehensive data scraping and analysis toolkit for professional cycling data from ProCyclingStats.
 
@@ -38,7 +38,7 @@ This project provides tools to scrape, store, and analyze professional cycling r
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd cycling_stats_exploration
+cd pc_puller
 ```
 
 2. Create and activate virtual environment:
@@ -77,7 +77,7 @@ python src/scraper_cli.py status
 ## Project Structure
 
 ```
-cycling_stats_exploration/
+pc_puller/
 ├── src/                    # Source code
 │   ├── main.py            # CLI entry point
 │   ├── async_scraper.py   # Main scraping engine
