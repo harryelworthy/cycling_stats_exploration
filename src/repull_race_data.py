@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List
 
-from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
+from improved_async_scraper import ImprovedAsyncCyclingDataScraper as AsyncCyclingDataScraper, ScrapingConfig
 from progress_tracker import progress_tracker
 
 # Setup logging

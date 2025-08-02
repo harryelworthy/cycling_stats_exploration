@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
+from improved_async_scraper import ImprovedAsyncCyclingDataScraper as AsyncCyclingDataScraper, ScrapingConfig
 from test_scraper import ScraperTestFramework
 from progress_tracker import progress_tracker
 
