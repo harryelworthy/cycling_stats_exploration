@@ -134,6 +134,25 @@ def parse_args():
         help='Database backup interval in seconds (default: 300 = 5 minutes)'
     )
     
+    # Overwrite control options
+    parser.add_argument(
+        '--overwrite-data',
+        action='store_true',
+        help='Allow overwriting existing race, stage, and result data'
+    )
+    
+    parser.add_argument(
+        '--overwrite-stages',
+        action='store_true',
+        help='Allow overwriting existing stage data only'
+    )
+    
+    parser.add_argument(
+        '--overwrite-results',
+        action='store_true',
+        help='Allow overwriting existing result data only'
+    )
+    
     return parser.parse_args()
 
 async def run_validation_tests(config: ScrapingConfig) -> bool:
@@ -239,7 +258,10 @@ async def main():
         request_delay=args.request_delay,
         max_retries=args.max_retries,
         timeout=args.timeout,
-        database_path=args.database
+        database_path=args.database,
+        overwrite_existing_data=args.overwrite_data,
+        overwrite_stages=args.overwrite_stages,
+        overwrite_results=args.overwrite_results
     )
     
     logger.info(f"🚀 Starting cycling data scraper")

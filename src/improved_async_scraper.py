@@ -31,6 +31,9 @@ class ScrapingConfig:
     retry_delay: float = 1.0
     timeout: int = 30
     database_path: str = "data/cycling_data.db"
+    overwrite_existing_data: bool = False  # Default to no overwriting
+    overwrite_stages: bool = False         # Control stage overwrites specifically
+    overwrite_results: bool = False        # Control result overwrites specifically
     
 @dataclass
 class ScrapingStats:
@@ -101,6 +104,12 @@ class ImprovedAsyncCyclingDataScraper:
         if not race_name:
             return "Unknown"
         
+        # Remove PCS prefix formatting like "» " at the start
+        race_name = re.sub(r'^»\s*', '', race_name)
+        
+        # Handle edition numbers at the start like "103rdTour de France" -> "Tour de France"
+        race_name = re.sub(r'^\d+\w*(?=[A-Z])', '', race_name)
+        
         # Remove year prefixes like "2024 " or "2024 - "
         race_name = re.sub(r'^\d{4}\s*[-–—]?\s*', '', race_name)
         
@@ -111,10 +120,31 @@ class ImprovedAsyncCyclingDataScraper:
         race_name = re.sub(r'\s*[-–—]?\s*\(\d+\)\s*$', '', race_name)
         race_name = re.sub(r'\s*[-–—]?\s*\d+\s*$', '', race_name)
         
-        # Remove extra whitespace
+        # Remove extra whitespace and clean up
         race_name = race_name.strip()
         
         return race_name if race_name else "Unknown"
+    
+    def format_rider_name(self, raw_name: str) -> str:
+        """Convert 'LastNameFirstName' format to 'FirstName LastName' format"""
+        if not raw_name or len(raw_name) < 2:
+            return raw_name
+        
+        # Handle names that are already properly formatted (contain spaces)
+        if ' ' in raw_name:
+            return raw_name
+        
+        # Look for pattern where lowercase letter is followed by uppercase letter
+        # This indicates the boundary between last name and first name
+        match = re.search(r'([a-z])([A-Z])', raw_name)
+        if match:
+            split_pos = match.start() + 1
+            last_name = raw_name[:split_pos]
+            first_name = raw_name[split_pos:]
+            return f"{first_name} {last_name}"
+        
+        # If no clear boundary found, return as-is
+        return raw_name
     
     def detect_race_category(self, race_name: str, uci_tour: str, stage_urls: List[str]) -> str:
         """Improved race category detection"""
@@ -173,6 +203,293 @@ class ImprovedAsyncCyclingDataScraper:
         # Clean the race name and create a consistent key
         clean_name = self.clean_race_name(race_name)
         return f"{year}_{clean_name}"
+    
+    def generate_classification_urls(self, race_url: str, stage_urls: List[str]) -> List[str]:
+        """Generate classification URLs for multi-stage races"""
+        classification_urls = []
+        
+        # Only generate classification URLs for multi-stage races
+        if len(stage_urls) <= 1:
+            return classification_urls
+        
+        # Extract stage numbers from existing stage URLs
+        stage_numbers = []
+        for url in stage_urls:
+            if '/stage-' in url:
+                try:
+                    # Extract stage number from URLs like "race/tour-de-france/2024/stage-15"
+                    stage_part = url.split('/stage-')[-1]
+                    stage_num = int(stage_part.split('/')[0].split('-')[0])  # Handle URLs with additional parts
+                    stage_numbers.append(stage_num)
+                except (ValueError, IndexError):
+                    continue
+        
+        if not stage_numbers:
+            return classification_urls
+        
+        # Get the race base URL (e.g., "race/tour-de-france/2024")
+        base_race_url = race_url.rstrip('/')
+        
+        # Sort stage numbers to find the final stage
+        stage_numbers.sort()
+        final_stage_num = max(stage_numbers)
+        
+        # Classification types to generate
+        classification_types = ['gc', 'points', 'kom', 'youth']
+        
+        # Generate final classification URLs (e.g., "race/tour-de-france/2024/gc")
+        for classification in classification_types:
+            final_classification_url = f"{base_race_url}/{classification}"
+            classification_urls.append(final_classification_url)
+        
+        # Generate mid-race classification URLs for a few key stages
+        # We'll generate them for stages at 25%, 50%, 75% and final-1 of the race
+        if len(stage_numbers) >= 4:  # Only for races with 4+ stages
+            key_stages = [
+                stage_numbers[len(stage_numbers) // 4],      # 25%
+                stage_numbers[len(stage_numbers) // 2],      # 50% 
+                stage_numbers[3 * len(stage_numbers) // 4],  # 75%
+                final_stage_num - 1 if final_stage_num > 1 else final_stage_num  # Second to last
+            ]
+            
+            # Remove duplicates and sort
+            key_stages = sorted(list(set(key_stages)))
+            
+            for stage_num in key_stages:
+                if stage_num != final_stage_num:  # Don't duplicate final stage
+                    for classification in classification_types:
+                        mid_race_url = f"{base_race_url}/stage-{stage_num}-{classification}"
+                        classification_urls.append(mid_race_url)
+        
+        logger.debug(f"Generated {len(classification_urls)} classification URLs for {race_url}")
+        return classification_urls
+    
+    def _should_fetch_classifications(self, stage_url: str) -> bool:
+        """Determine if we should fetch classification data for this stage"""
+        # Fetch classification data for all stages of multi-stage races
+        # This ensures we have complete GC progression throughout the race
+        
+        # Fetch for all stages (not just final stages)
+        if '/stage-' in stage_url:
+            return True
+            
+        # Don't fetch for one-day races (results pages)
+        if '/result' in stage_url and '/stage-' not in stage_url:
+            return False
+            
+        return False
+    
+    async def _fetch_and_merge_classifications(self, stage_info: Dict[str, Any]):
+        """Fetch classification data from separate URLs and merge with stage results"""
+        stage_url = stage_info['stage_url']
+        
+        # Extract race URL and stage number from stage_url
+        # e.g., "race/tour-de-france/2024/stage-21" -> "race/tour-de-france/2024" and "21"
+        url_parts = stage_url.split('/')
+        if len(url_parts) >= 4 and '/stage-' in stage_url:
+            race_base = '/'.join(url_parts[:-1])  # "race/tour-de-france/2024"
+            stage_part = url_parts[-1]  # "stage-21"
+            
+            try:
+                stage_num = int(stage_part.split('-')[-1])  # 21
+            except (ValueError, IndexError):
+                logger.warning(f"Could not extract stage number from {stage_url}")
+                return
+            
+            # Determine if this is the final stage by checking available classification URLs
+            classification_types = ['gc', 'points', 'kom', 'youth']
+            
+            for classification in classification_types:
+                # Try final classification first (e.g., "race/tour-de-france/2024/gc")
+                final_classification_url = f"{race_base}/{classification}"
+                classification_data = await self._fetch_classification_data(final_classification_url)
+                
+                if classification_data:
+                    # Use final classification data
+                    stage_info[classification] = classification_data
+                    logger.debug(f"Fetched final {classification} data from {final_classification_url}")
+                else:
+                    # Try stage-specific classification (e.g., "race/tour-de-france/2024/stage-21-gc")
+                    stage_classification_url = f"{race_base}/stage-{stage_num}-{classification}"
+                    classification_data = await self._fetch_classification_data(stage_classification_url)
+                    
+                    if classification_data:
+                        stage_info[classification] = classification_data
+                        logger.debug(f"Fetched stage {classification} data from {stage_classification_url}")
+                    else:
+                        logger.debug(f"No {classification} data found for {stage_url}")
+    
+    def _merge_classifications_into_results(self, stage_info: Dict[str, Any]):
+        """Merge classification data into stage results for test compatibility"""
+        results = stage_info.get('results', [])
+        gc_results = {r.get('rider_url'): r for r in stage_info.get('gc', [])}
+        points_results = {r.get('rider_url'): r for r in stage_info.get('points', [])}
+        kom_results = {r.get('rider_url'): r for r in stage_info.get('kom', [])}
+        youth_results = {r.get('rider_url'): r for r in stage_info.get('youth', [])}
+        
+        # Debug logging for classification data
+        if gc_results:
+            logger.debug(f"Found {len(gc_results)} GC results for merging")
+        else:
+            logger.debug("No GC results found for merging")
+        
+        # Merge classification data into each result
+        for result in results:
+            rider_url = result.get('rider_url')
+            
+            # Add GC data
+            gc_data = gc_results.get(rider_url, {})
+            result['gc_rank'] = gc_data.get('rank')
+            result['gc_uci_points'] = gc_data.get('uci_points')
+            
+            # Add points data
+            points_data = points_results.get(rider_url, {})
+            result['points_rank'] = points_data.get('rank')
+            result['points_uci_points'] = points_data.get('uci_points')
+            
+            # Add KOM data
+            kom_data = kom_results.get(rider_url, {})
+            result['kom_rank'] = kom_data.get('rank')
+            result['kom_uci_points'] = kom_data.get('uci_points')
+            
+            # Add youth data
+            youth_data = youth_results.get(rider_url, {})
+            result['youth_rank'] = youth_data.get('rank')
+            result['youth_uci_points'] = youth_data.get('uci_points')
+    
+    async def _fetch_classification_data(self, classification_url: str) -> List[Dict[str, Any]]:
+        """Fetch and parse classification data from a classification URL"""
+        base_url = 'https://www.procyclingstats.com/'
+        full_url = urljoin(base_url, classification_url)
+        
+        logger.debug(f"Fetching classification data from: {full_url}")
+        
+        html_content = await self.make_request(full_url)
+        if not html_content:
+            logger.debug(f"No HTML content received for classification URL: {full_url}")
+            return []
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Find the correct classification table
+            # For classification pages, we need to find the table with classification data,
+            # not the stage results table
+            results_table = self._find_classification_table(soup, classification_url)
+            if results_table:
+                results = self.parse_results_table(results_table, secondary=True)
+                logger.debug(f"Parsed {len(results)} classification results from {classification_url}")
+                return results
+            else:
+                logger.debug(f"No classification results table found in {classification_url}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error parsing classification data from {classification_url}: {e}")
+            return []
+    
+    def _find_classification_table(self, soup, classification_url: str):
+        """Find the correct classification table on a classification page"""
+        # Get all tables with results class
+        all_tables = soup.find_all('table', class_='results')
+        
+        # Determine what type of classification this is
+        classification_type = None
+        if '/gc' in classification_url:
+            classification_type = 'gc'
+        elif '/points' in classification_url:
+            classification_type = 'points'
+        elif '/kom' in classification_url:
+            classification_type = 'kom'
+        elif '/youth' in classification_url:
+            classification_type = 'youth'
+        
+        logger.debug(f"Looking for {classification_type} table in {len(all_tables)} tables")
+        
+        # For each table, analyze its headers to determine if it's the right classification table
+        for i, table in enumerate(all_tables):
+            table_score = self._score_classification_table(table, classification_type)
+            logger.debug(f"Table {i+1} score: {table_score}")
+            
+            # If this table has a good score for the classification type, use it
+            if table_score > 0.7:  # Threshold for confidence
+                logger.debug(f"Selected table {i+1} for {classification_type} (score: {table_score})")
+                return table
+        
+        # If no table meets the threshold, fall back to the second table if available
+        # (first table is often stage results, second is often classification)
+        if len(all_tables) >= 2:
+            logger.debug(f"Using fallback table 2 for {classification_type}")
+            return all_tables[1]
+        elif len(all_tables) >= 1:
+            logger.debug(f"Using fallback table 1 for {classification_type}")
+            return all_tables[0]
+        
+        return None
+    
+    def _score_classification_table(self, table, classification_type: str) -> float:
+        """Score how likely a table is to be the correct classification table"""
+        score = 0.0
+        
+        # Find headers
+        headers = []
+        header_row = table.find('thead')
+        if not header_row:
+            header_row = table.find('tr')
+        
+        if header_row:
+            header_cells = header_row.find_all(['th', 'td'])
+            headers = [cell.get_text(strip=True).lower() for cell in header_cells]
+        
+        # Check for classification-specific indicators
+        header_text = ' '.join(headers)
+        
+        # Classification tables should have:
+        # - Rank column
+        if any('rnk' in h or 'rank' in h for h in headers):
+            score += 0.3
+        
+        # - Time-related columns for GC
+        if classification_type == 'gc':
+            if any('time' in h for h in headers):
+                score += 0.2
+            # Previous rank column is a strong indicator
+            if any('prev' in h for h in headers):  
+                score += 0.4
+            # GC tables often have arrows for rank changes (very strong indicator)
+            if '▼▲' in header_text or '▲' in header_text or '▼' in header_text:
+                score += 0.4
+            # Time won/lost is specific to GC tables
+            if any('time won' in h or 'time lost' in h for h in headers):
+                score += 0.3
+            # If this looks like a stage result table (has GC column), penalize it
+            if any('gc' == h.lower() for h in headers):  # Exact match to 'gc' column
+                score -= 0.5
+        
+        # - Points for points/kom classifications
+        elif classification_type in ['points', 'kom']:
+            if any('pnt' in h or 'point' in h for h in headers):
+                score += 0.4
+        
+        # Check first few data rows for classification indicators
+        data_rows = table.find_all('tr')[1:4]  # Skip header, check first 3 rows
+        for row in data_rows:
+            cells = row.find_all(['td', 'th'])
+            if len(cells) > 0:
+                # Check if first cell looks like a rank (1, 2, 3, etc.)
+                first_cell = cells[0].get_text(strip=True)
+                if first_cell.isdigit() and int(first_cell) <= 10:
+                    score += 0.1
+                    
+                # For GC, check for time gaps
+                if classification_type == 'gc':
+                    for cell in cells:
+                        cell_text = cell.get_text(strip=True)
+                        if ':' in cell_text and ('+' in cell_text or 'h' in cell_text):
+                            score += 0.1
+                            break
+        
+        return min(score, 1.0)  # Cap at 1.0
     
     async def init_database(self):
         """Initialize SQLite database with improved schema"""
@@ -247,6 +564,20 @@ class ImprovedAsyncCyclingDataScraper:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_races_key ON races(race_key)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_stages_race_id ON stages(race_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_results_stage_id ON results(stage_id)')
+            
+            # Add unique constraint for results to prevent duplicates
+            # Note: This will be applied after cleaning existing duplicates
+            try:
+                await db.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_results_unique 
+                    ON results(stage_id, rider_name, rank, time, status)
+                ''')
+                logger.debug("Unique constraint on results created successfully")
+            except Exception as e:
+                logger.warning(f"Could not create unique constraint on results (duplicates may exist): {e}")
+            
+            # Performance index for duplicate checking
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_results_lookup ON results(stage_id, rider_name)')
             
             await db.commit()
             logger.info(f"Database initialized at {self.config.database_path}")
@@ -422,6 +753,10 @@ class ImprovedAsyncCyclingDataScraper:
                 result_url = f"{race_url}/result"
                 stage_urls.append(result_url)
             
+            # Store classification URLs for later use (don't add to stage_urls)
+            # We'll use these to enhance final stage data with GC information
+            self._current_race_classification_urls = self.generate_classification_urls(race_url, stage_urls) if len(stage_urls) > 1 else []
+            
             # Extract year from race_url for historical context
             year = None
             try:
@@ -480,17 +815,48 @@ class ImprovedAsyncCyclingDataScraper:
                 # Generate unique race key
                 race_key = self.generate_race_key(year, race_data['race_name'])
                 
-                # Check if race already exists
+                # Check if race already exists - try both new and old race key formats
                 cursor = await db.execute(
                     'SELECT id FROM races WHERE race_key = ?',
                     (race_key,)
                 )
                 existing_race = await cursor.fetchone()
                 
+                # Also check for old race key format (with » prefix) in case of legacy data
+                if not existing_race:
+                    old_race_key = f"{year}_»{race_data['race_name']}"
+                    cursor = await db.execute(
+                        'SELECT id FROM races WHERE race_key = ?',
+                        (old_race_key,)
+                    )
+                    existing_race = await cursor.fetchone()
+                
+                # As a final fallback, check by stage_url (since that's what's causing the constraint failure)
+                if not existing_race and race_data['stage_urls']:
+                    cursor = await db.execute(
+                        'SELECT id FROM races WHERE stage_url = ? AND year = ?',
+                        (race_data['stage_urls'][0], year)
+                    )
+                    existing_race = await cursor.fetchone()
+                
                 if existing_race:
-                    # Race already exists, return existing ID
-                    logger.debug(f"Race already exists: {race_data['race_name']} ({year})")
-                    return existing_race[0]
+                    # Race already exists
+                    if self.config.overwrite_existing_data:
+                        # Delete existing race and all associated data
+                        logger.debug(f"Race exists, overwriting: {race_data['race_name']} ({year})")
+                        race_id = existing_race[0]
+                        
+                        # Delete in correct order due to foreign keys
+                        await db.execute('DELETE FROM results WHERE stage_id IN (SELECT id FROM stages WHERE race_id = ?)', (race_id,))
+                        await db.execute('DELETE FROM stages WHERE race_id = ?', (race_id,))
+                        await db.execute('DELETE FROM races WHERE id = ?', (race_id,))
+                        await db.commit()
+                        
+                        # Continue to insert new race data below
+                    else:
+                        # Skip overwrite, return existing ID
+                        logger.debug(f"Race already exists: {race_data['race_name']} ({year})")
+                        return existing_race[0]
                 
                 # Insert new race record
                 race_cursor = await db.execute('''
@@ -516,7 +882,7 @@ class ImprovedAsyncCyclingDataScraper:
                 return None
     
     async def save_stage_data(self, race_id: int, stage_data: Dict[str, Any]) -> Optional[int]:
-        """Save stage data to SQLite database"""
+        """Save stage data to SQLite database with overwrite control"""
         async with aiosqlite.connect(self.config.database_path) as db:
             try:
                 # Check if stage already exists
@@ -527,8 +893,34 @@ class ImprovedAsyncCyclingDataScraper:
                 existing_stage = await cursor.fetchone()
                 
                 if existing_stage:
-                    # Stage already exists, return existing ID
-                    return existing_stage[0]
+                    # Stage already exists
+                    should_overwrite = (self.config.overwrite_existing_data or 
+                                      self.config.overwrite_stages)
+                    
+                    if not should_overwrite:
+                        # Skip overwrite, return existing ID
+                        logger.debug(f"Stage exists, skipping: {stage_data['stage_url']}")
+                        return existing_stage[0]
+                    else:
+                        # Update existing stage
+                        logger.debug(f"Stage exists, overwriting: {stage_data['stage_url']}")
+                        await db.execute('''
+                            UPDATE stages SET
+                                race_id = ?, is_one_day_race = ?, distance = ?, stage_type = ?,
+                                winning_attack_length = ?, date = ?, won_how = ?, avg_speed_winner = ?,
+                                avg_temperature = ?, vertical_meters = ?, profile_icon = ?, 
+                                profile_score = ?, race_startlist_quality_score = ?
+                            WHERE stage_url = ?
+                        ''', (
+                            race_id, stage_data['is_one_day_race'], stage_data['distance'],
+                            stage_data['stage_type'], stage_data['winning_attack_length'],
+                            stage_data['date'], stage_data['won_how'], stage_data['avg_speed_winner'],
+                            stage_data['avg_temperature'], stage_data['vertical_meters'],
+                            stage_data['profile_icon'], stage_data['profile_score'],
+                            stage_data['race_startlist_quality_score'], stage_data['stage_url']
+                        ))
+                        await db.commit()
+                        return existing_stage[0]
                 
                 # Insert stage record
                 stage_cursor = await db.execute('''
@@ -564,7 +956,7 @@ class ImprovedAsyncCyclingDataScraper:
                 return None
     
     async def save_results_data(self, stage_id: int, stage_data: Dict[str, Any]):
-        """Save results data to SQLite database with improved error handling"""
+        """Save results data to SQLite database with duplicate prevention and overwrite control"""
         async with aiosqlite.connect(self.config.database_path) as db:
             try:
                 # Check if results already exist for this stage
@@ -575,8 +967,16 @@ class ImprovedAsyncCyclingDataScraper:
                 existing_count = await cursor.fetchone()
                 
                 if existing_count[0] > 0:
-                    logger.debug(f"Results already exist for stage {stage_id}, skipping")
-                    return
+                    should_overwrite = (self.config.overwrite_existing_data or 
+                                      self.config.overwrite_results)
+                    
+                    if not should_overwrite:
+                        logger.debug(f"Results already exist for stage {stage_id}, skipping (overwrite=False)")
+                        return
+                    else:
+                        # Delete existing results for this stage before inserting new ones
+                        logger.debug(f"Results exist for stage {stage_id}, overwriting (overwrite=True)")
+                        await db.execute('DELETE FROM results WHERE stage_id = ?', (stage_id,))
                 
                 # Prepare results with secondary classifications
                 results = stage_data.get('results', [])
@@ -598,9 +998,9 @@ class ImprovedAsyncCyclingDataScraper:
                     kom_data = kom_results.get(rider_url, {})
                     youth_data = youth_results.get(rider_url, {})
                     
-                    # Insert result record
+                    # Insert result record (with OR IGNORE as safety against duplicates)
                     await db.execute('''
-                        INSERT INTO results (
+                        INSERT OR IGNORE INTO results (
                             stage_id, rider_name, rider_url, team_name, team_url,
                             rank, status, time, uci_points, pcs_points, age,
                             gc_rank, gc_uci_points, points_rank, points_uci_points,
@@ -739,22 +1139,13 @@ class ImprovedAsyncCyclingDataScraper:
             if results_table:
                 stage_info['results'] = self.parse_results_table(results_table)
             
-            # Extract secondary classifications
-            gc_table = soup.find('table', class_='results', attrs={'data-type': 'gc'})
-            if gc_table:
-                stage_info['gc'] = self.parse_results_table(gc_table, secondary=True)
-            
-            points_table = soup.find('table', class_='results', attrs={'data-type': 'points'})
-            if points_table:
-                stage_info['points'] = self.parse_results_table(points_table, secondary=True)
-            
-            kom_table = soup.find('table', class_='results', attrs={'data-type': 'kom'})
-            if kom_table:
-                stage_info['kom'] = self.parse_results_table(kom_table, secondary=True)
-            
-            youth_table = soup.find('table', class_='results', attrs={'data-type': 'youth'})
-            if youth_table:
-                stage_info['youth'] = self.parse_results_table(youth_table, secondary=True)
+            # Extract secondary classifications from separate URLs
+            # Only fetch for final stages to get complete GC standings
+            if self._should_fetch_classifications(stage_url):
+                await self._fetch_and_merge_classifications(stage_info)
+                
+                # Merge classification data into stage results for test compatibility
+                self._merge_classifications_into_results(stage_info)
             
             return stage_info
             
@@ -774,7 +1165,24 @@ class ImprovedAsyncCyclingDataScraper:
         results = []
         
         try:
-            rows = table.find_all('tr')[1:]  # Skip header row
+            rows = table.find_all('tr')
+            
+            # Check if first row is actually data (has rider links) or header
+            start_row = 0
+            if rows:
+                first_row = rows[0]
+                first_row_cells = first_row.find_all(['td', 'th'])
+                has_rider_links = False
+                for cell in first_row_cells:
+                    if cell.find('a', href=lambda x: x and 'rider/' in x):
+                        has_rider_links = True
+                        break
+                
+                # If first row has no rider links, it's likely a header
+                if not has_rider_links:
+                    start_row = 1
+            
+            rows = rows[start_row:]  # Skip header if detected
             for row in rows:
                 cells = row.find_all(['td', 'th'])
                 if len(cells) < 3:
@@ -782,53 +1190,155 @@ class ImprovedAsyncCyclingDataScraper:
                 
                 result = {}
                 
-                # Extract rider name and URL
-                rider_cell = cells[1] if not secondary else cells[0]
-                rider_link = rider_cell.find('a')
-                if rider_link:
-                    result['rider_name'] = rider_link.get_text(strip=True)
-                    result['rider_url'] = rider_link.get('href', '')
+                if secondary:
+                    # Classification pages have different structure
+                    # Rank is in cell 0, rider info typically in cell with links
+                    rider_info_found = False
+                    
+                    # Extract rank from cell 0
+                    try:
+                        result['rank'] = int(cells[0].get_text(strip=True))
+                    except:
+                        result['rank'] = None
+                    
+                    # Search for rider and team links in all cells
+                    rider_links = []
+                    team_links = []
+                    
+                    for cell in cells:
+                        links = cell.find_all('a')
+                        for link in links:
+                            href = link.get('href', '')
+                            if 'rider/' in href:
+                                rider_links.append(link)
+                            elif 'team/' in href:
+                                team_links.append(link)
+                    
+                    # Extract rider info
+                    if rider_links:
+                        rider_link = rider_links[0]  # Take first rider link
+                        raw_rider_name = rider_link.get_text(strip=True)
+                        result['rider_name'] = self.format_rider_name(raw_rider_name)
+                        result['rider_url'] = rider_link.get('href', '')
+                        rider_info_found = True
+                    
+                    # Extract team info
+                    if team_links:
+                        team_link = team_links[0]  # Take first team link
+                        result['team_name'] = team_link.get_text(strip=True)
+                        result['team_url'] = team_link.get('href', '')
+                    else:
+                        result['team_name'] = ''
+                        result['team_url'] = ''
+                    
+                    # If no rider info found, skip this row
+                    if not rider_info_found:
+                        continue
+                        
                 else:
-                    result['rider_name'] = rider_cell.get_text(strip=True)
-                    result['rider_url'] = ''
-                
-                # Extract team name and URL
-                team_cell = cells[2] if not secondary else cells[1]
-                team_link = team_cell.find('a')
-                if team_link:
-                    result['team_name'] = team_link.get_text(strip=True)
-                    result['team_url'] = team_link.get('href', '')
-                else:
-                    result['team_name'] = team_cell.get_text(strip=True)
-                    result['team_url'] = ''
-                
-                # Extract rank
-                rank_cell = cells[0] if not secondary else cells[0]
-                try:
-                    result['rank'] = int(rank_cell.get_text(strip=True))
-                except:
-                    result['rank'] = None
+                    # Regular stage results - use same structure as secondary (modern PCS format)
+                    # Extract rank from cell 0 
+                    try:
+                        result['rank'] = int(cells[0].get_text(strip=True))
+                    except:
+                        result['rank'] = None
+                    
+                    # Search for rider and team links in all cells (same as secondary logic)
+                    rider_links = []
+                    team_links = []
+                    
+                    for cell in cells:
+                        links = cell.find_all('a')
+                        for link in links:
+                            href = link.get('href', '')
+                            if 'rider/' in href:
+                                rider_links.append(link)
+                            elif 'team/' in href:
+                                team_links.append(link)
+                    
+                    # Extract rider info
+                    if rider_links:
+                        rider_link = rider_links[0]  # Take first rider link
+                        raw_rider_name = rider_link.get_text(strip=True)
+                        result['rider_name'] = self.format_rider_name(raw_rider_name)
+                        result['rider_url'] = rider_link.get('href', '')
+                    else:
+                        # Skip rows without rider info
+                        continue
+                    
+                    # Extract team info
+                    if team_links:
+                        team_link = team_links[0]  # Take first team link
+                        result['team_name'] = team_link.get_text(strip=True)
+                        result['team_url'] = team_link.get('href', '')
+                    else:
+                        result['team_name'] = ''
+                        result['team_url'] = ''
                 
                 # Extract time gap
                 if len(cells) > 3:
                     time_cell = cells[3] if not secondary else cells[2]
                     result['time'] = time_cell.get_text(strip=True)
                 
-                # Extract UCI points
-                if len(cells) > 4:
-                    uci_cell = cells[4] if not secondary else cells[3]
-                    try:
-                        result['uci_points'] = int(uci_cell.get_text(strip=True))
-                    except:
-                        result['uci_points'] = None
+                # Extract UCI and PCS points with header-based column identification
+                result['uci_points'] = None
+                result['pcs_points'] = None
                 
-                # Extract PCS points
-                if len(cells) > 5:
-                    pcs_cell = cells[5] if not secondary else cells[4]
+                # Get table header to identify column positions
+                table = row.find_parent('table')
+                if table:
+                    header_row = table.find('thead')
+                    if not header_row:
+                        header_row = table.find('tr')  # First row might be header
+                    
+                    if header_row:
+                        header_cells = header_row.find_all(['th', 'td'])
+                        uci_col_idx = None
+                        pcs_col_idx = None
+                        
+                        # Look for UCI and PCS column headers
+                        for idx, header_cell in enumerate(header_cells):
+                            header_text = header_cell.get_text(strip=True).lower()
+                            if 'uci' in header_text:
+                                uci_col_idx = idx
+                            elif 'pcs' in header_text:
+                                pcs_col_idx = idx
+                        
+                        # Extract points using identified column positions
+                        if uci_col_idx is not None and len(cells) > uci_col_idx:
+                            try:
+                                uci_text = cells[uci_col_idx].get_text(strip=True)
+                                if uci_text and uci_text.isdigit():
+                                    result['uci_points'] = int(uci_text)
+                            except (ValueError, IndexError):
+                                pass
+                        
+                        if pcs_col_idx is not None and len(cells) > pcs_col_idx:
+                            try:
+                                pcs_text = cells[pcs_col_idx].get_text(strip=True)
+                                if pcs_text and pcs_text.isdigit():
+                                    result['pcs_points'] = int(pcs_text)
+                            except (ValueError, IndexError):
+                                pass
+                
+                # Fallback: try the old fixed position approach if header-based didn't work
+                if result['uci_points'] is None and len(cells) > 4:
                     try:
-                        result['pcs_points'] = int(pcs_cell.get_text(strip=True))
-                    except:
-                        result['pcs_points'] = None
+                        uci_cell = cells[4] if not secondary else cells[3]
+                        uci_text = uci_cell.get_text(strip=True)
+                        if uci_text and uci_text.isdigit():
+                            result['uci_points'] = int(uci_text)
+                    except (ValueError, IndexError):
+                        pass
+                
+                if result['pcs_points'] is None and len(cells) > 5:
+                    try:
+                        pcs_cell = cells[5] if not secondary else cells[4]
+                        pcs_text = pcs_cell.get_text(strip=True)
+                        if pcs_text and pcs_text.isdigit():
+                            result['pcs_points'] = int(pcs_text)
+                    except (ValueError, IndexError):
+                        pass
                 
                 results.append(result)
                 
@@ -905,7 +1415,7 @@ class ImprovedAsyncCyclingDataScraper:
                         
                         # Mark race as completed
                         if self.progress_tracker:
-                            await self.progress_tracker.mark_race_completed(race_url)
+                            await self.progress_tracker.mark_race_completed(race_url, race_stages, race_results)
                         
                         total_results += race_results
                         

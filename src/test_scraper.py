@@ -12,8 +12,9 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
+import aiosqlite
 
-from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
+from improved_async_scraper import ImprovedAsyncCyclingDataScraper as AsyncCyclingDataScraper, ScrapingConfig
 
 # Configure detailed test logging
 logging.basicConfig(
@@ -51,8 +52,12 @@ class KnownResult:
     expected_elevation: Optional[int] = None  # e.g., 1679 m
     expected_profile_score: Optional[int] = None  # e.g., 29
     jersey_type: Optional[str] = None  # 'gc', 'points', 'kom', 'youth' for jersey standings
+    expected_gc_rank: Optional[int] = None  # Expected GC rank for stage results
+    expected_points_rank: Optional[int] = None  # Expected points classification rank
+    expected_kom_rank: Optional[int] = None  # Expected KOM classification rank
+    expected_youth_rank: Optional[int] = None  # Expected youth classification rank
     description: str = ""
-    test_type: str = "general"  # 'gc', 'stage', 'general', 'historical', 'jersey'
+    test_type: str = "general"  # 'gc', 'stage', 'general', 'historical', 'jersey', 'stage_with_gc'
 
 @dataclass
 class TestResult:
@@ -243,6 +248,47 @@ class ScraperTestFramework:
                 jersey_type="kom",
                 test_type="jersey",
                 description="Montaguti Tour de Suisse 2012 - KOM Leader (CORRECTED)"
+            ),
+            
+            # === STAGE-LEVEL GC TESTS (Should include GC data for stage results) ===
+            # Tour de France 2024 Stage 21 - Final stage should have complete GC standings
+            KnownResult(
+                race_url="race/tour-de-france/2024/stage-21",
+                rider_name="Tadej Pogačar",
+                expected_rank=1,  # Stage winner
+                expected_gc_rank=1,  # GC winner
+                test_type="stage_with_gc",
+                description="TDF 2024 Stage 21 - Pogacar stage win + GC win (STAGE GC TEST)"
+            ),
+            
+            # Tour de France 2024 Stage 21 - Vingegaard should be 2nd in GC
+            KnownResult(
+                race_url="race/tour-de-france/2024/stage-21",
+                rider_name="Jonas Vingegaard", 
+                expected_rank=999,  # We don't care about stage rank, just GC
+                expected_gc_rank=2,  # 2nd in GC
+                test_type="stage_with_gc",
+                description="TDF 2024 Stage 21 - Vingegaard 2nd in GC (STAGE GC TEST)"
+            ),
+            
+            # Mid-race stage test - Tour de France 2024 Stage 15
+            KnownResult(
+                race_url="race/tour-de-france/2024/stage-15",
+                rider_name="Tadej Pogačar",
+                expected_rank=999,  # We don't care about stage rank, just GC
+                expected_gc_rank=1,  # Should be GC leader after stage 15
+                test_type="stage_with_gc", 
+                description="TDF 2024 Stage 15 - Pogacar GC leader mid-race (STAGE GC TEST)"
+            ),
+            
+            # Giro d'Italia 2024 final stage GC test
+            KnownResult(
+                race_url="race/giro-d-italia/2024/stage-21",
+                rider_name="Tadej Pogačar",
+                expected_rank=999,  # We don't care about stage rank, just GC
+                expected_gc_rank=1,  # GC winner
+                test_type="stage_with_gc",
+                description="Giro 2024 Stage 21 - Pogacar GC winner (STAGE GC TEST)"
             )
         ]
         
@@ -332,6 +378,9 @@ class ScraperTestFramework:
                 
                 # Test 5: Format consistency tests
                 await self._test_format_consistency(scraper)
+                
+                # Test 6: Database GC data verification tests
+                await self._test_database_gc_data()
                 
         except Exception as e:
             logger.error(f"❌ Test suite failed with exception: {e}")
@@ -656,6 +705,53 @@ class ScraperTestFramework:
                 if not stage_info or not stage_info.get('results'):
                     raise Exception(f"Failed to get results for {known_result.race_url}")
                 
+                # For GC tests that have parsed GC data, save to database for verification
+                if (hasattr(known_result, 'expected_gc_rank') and known_result.expected_gc_rank is not None and 
+                    stage_info.get('gc')):
+                    try:
+                        # Create a test race and stage using the scraper's own methods
+                        url_parts = known_result.race_url.split('/')
+                        race_name = url_parts[1].replace('-', ' ').title()
+                        year = int(url_parts[2])
+                        
+                        # Create a fake race record
+                        race_data = {
+                            'race_key': f"test_{url_parts[1]}_{year}",
+                            'race_name': race_name,
+                            'year': year,
+                            'stage_url': f"race/{url_parts[1]}/{year}",
+                            'race_category': 'test',
+                            'uci_tour': 'test',
+                            'stage_urls': [known_result.race_url]
+                        }
+                        
+                        # Save race and get race_id
+                        race_id = await scraper.save_race_data(year, race_data)
+                        if race_id:
+                            # Save stage and get stage_id  
+                            stage_data = {
+                                'stage_url': known_result.race_url,
+                                'stage_type': 'test',
+                                'is_one_day_race': False,
+                                'distance': 100.0,
+                                'date': '2024-01-01',
+                                'winning_attack_length': 0.0,
+                                'won_how': 'test',
+                                'avg_speed_winner': 40.0,
+                                'avg_temperature': 20.0,
+                                'vertical_meters': 1000,
+                                'profile_icon': 'flat',
+                                'profile_score': 1,
+                                'race_startlist_quality_score': 500
+                            }
+                            stage_id = await scraper.save_stage_data(race_id, stage_data)
+                            if stage_id:
+                                # Save results with GC data
+                                await scraper.save_results_data(stage_id, stage_info)
+                                logger.debug(f"Saved GC test data for {known_result.description}")
+                    except Exception as e:
+                        logger.debug(f"Could not save GC test data for {known_result.description}: {e}")
+                
                 results = stage_info['results']
                 
                 # Find the rider in results
@@ -961,6 +1057,36 @@ class ScraperTestFramework:
                                 )
                             )
                 
+                # Validate GC rank if expected (for stage_with_gc test type)
+                gc_rank_correct = True
+                if known_result.expected_gc_rank is not None:
+                    actual_gc_rank = rider_result.get('gc_rank')
+                    gc_rank_correct = actual_gc_rank == known_result.expected_gc_rank
+                    
+                    if not gc_rank_correct:
+                        self.validation_errors.append(
+                            ScrapingValidationError(
+                                stage="known_results",
+                                url=known_result.race_url,
+                                error_type="gc_rank_mismatch",
+                                error_message=f"GC rank mismatch for {known_result.rider_name} (STAGE GC TEST FAILED)",
+                                expected_vs_actual={
+                                    "expected_gc_rank": known_result.expected_gc_rank,
+                                    "actual_gc_rank": actual_gc_rank,
+                                    "test_type": known_result.test_type,
+                                    "stage_url": known_result.race_url,
+                                    "rider_name": known_result.rider_name,
+                                    "stage_rank": rider_result.get('rank'),
+                                    "all_gc_data": {
+                                        "gc_rank": actual_gc_rank,
+                                        "points_rank": rider_result.get('points_rank'),
+                                        "kom_rank": rider_result.get('kom_rank'),
+                                        "youth_rank": rider_result.get('youth_rank')
+                                    }
+                                }
+                            )
+                        )
+                
                 if not rank_correct:
                     self.validation_errors.append(
                         ScrapingValidationError(
@@ -979,7 +1105,7 @@ class ScraperTestFramework:
                 test_passed = (rank_correct and uci_points_correct and pcs_points_correct and 
                              team_correct and age_correct and avg_speed_correct and won_how_correct and
                              startlist_quality_correct and distance_correct and elevation_correct and
-                             profile_score_correct)
+                             profile_score_correct and gc_rank_correct)
                 
                 self.test_results.append(TestResult(
                     test_name=test_name,
@@ -1102,6 +1228,159 @@ class ScraperTestFramework:
                 passed=False,
                 error=str(e),
                 execution_time=execution_time
+            ))
+    
+    async def _test_database_gc_data(self):
+        """Test that the database actually contains GC and classification data"""
+        logger.info("🗃️ Testing database GC data integrity...")
+        
+        test_start = datetime.now()
+        
+        try:
+            import sqlite3
+            
+            # Connect to the test database where we saved the GC test data
+            db_path = self.config.database_path
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Test cases for database verification
+            database_tests = [
+                {
+                    "name": "TDF_2024_Final_GC_Pogacar",
+                    "description": "Tour de France 2024 Final Stage - Pogacar GC Winner in Database",
+                    "query": """
+                        SELECT r.gc_rank, r.rider_name, s.stage_url, race.race_name, race.year
+                        FROM results r 
+                        JOIN stages s ON r.stage_id = s.id 
+                        JOIN races race ON s.race_id = race.id
+                        WHERE race.race_name LIKE '%Tour%France%' 
+                        AND race.year = 2024 
+                        AND s.stage_url LIKE '%stage-21%'
+                        AND r.rider_name LIKE '%Pog%'
+                        AND r.gc_rank = 1
+                    """,
+                    "expected_rows": 1,
+                    "test_type": "database_gc"
+                },
+                {
+                    "name": "TDF_2024_Final_GC_Vingegaard", 
+                    "description": "Tour de France 2024 Final Stage - Vingegaard 2nd GC in Database",
+                    "query": """
+                        SELECT r.gc_rank, r.rider_name, s.stage_url, race.race_name, race.year
+                        FROM results r 
+                        JOIN stages s ON r.stage_id = s.id 
+                        JOIN races race ON s.race_id = race.id
+                        WHERE race.race_name LIKE '%Tour%France%' 
+                        AND race.year = 2024 
+                        AND s.stage_url LIKE '%stage-21%'
+                        AND r.rider_name LIKE '%Vingegaard%'
+                        AND r.gc_rank = 2
+                    """,
+                    "expected_rows": 1,
+                    "test_type": "database_gc"
+                },
+                {
+                    "name": "Any_Stage_Race_GC_Data",
+                    "description": "Any stage race should have some GC data in database",
+                    "query": """
+                        SELECT COUNT(*) as gc_results_count
+                        FROM results r 
+                        WHERE r.gc_rank IS NOT NULL AND r.gc_rank > 0
+                    """,
+                    "expected_minimum": 100,  # Should have hundreds of GC results
+                    "test_type": "database_gc_count"
+                },
+                {
+                    "name": "Points_Classification_Data",
+                    "description": "Should have points classification data in database", 
+                    "query": """
+                        SELECT COUNT(*) as points_results_count
+                        FROM results r 
+                        WHERE r.points_rank IS NOT NULL AND r.points_rank > 0
+                    """,
+                    "expected_minimum": 50,  # Should have some points classification results
+                    "test_type": "database_points_count"
+                }
+            ]
+            
+            for test_case in database_tests:
+                logger.info(f"   Testing: {test_case['description']}")
+                
+                cursor.execute(test_case['query'])
+                results = cursor.fetchall()
+                
+                test_passed = False
+                error_details = {}
+                
+                if test_case['test_type'] in ['database_gc_count', 'database_points_count']:
+                    # Count-based test
+                    actual_count = results[0][0] if results else 0
+                    expected_min = test_case['expected_minimum']
+                    test_passed = actual_count >= expected_min
+                    
+                    if not test_passed:
+                        error_details = {
+                            "expected_minimum": expected_min,
+                            "actual_count": actual_count,
+                            "query": test_case['query']
+                        }
+                        logger.warning(f"      ❌ {test_case['description']} - FAILED")
+                        logger.warning(f"         Expected >= {expected_min}, got {actual_count}")
+                else:
+                    # Row-based test
+                    expected_rows = test_case['expected_rows']
+                    actual_rows = len(results)
+                    test_passed = actual_rows == expected_rows
+                    
+                    if not test_passed:
+                        error_details = {
+                            "expected_rows": expected_rows,
+                            "actual_rows": actual_rows,
+                            "query": test_case['query'],
+                            "sample_results": results[:3] if results else []
+                        }
+                        logger.warning(f"      ❌ {test_case['description']} - FAILED")
+                        logger.warning(f"         Expected {expected_rows} rows, got {actual_rows}")
+                
+                if not test_passed:
+                    self.validation_errors.append(
+                        ScrapingValidationError(
+                            stage="database_gc_verification",
+                            url="database",
+                            error_type="database_gc_missing",
+                            error_message=f"Database GC test failed: {test_case['description']}",
+                            expected_vs_actual=error_details
+                        )
+                    )
+                else:
+                    logger.info(f"      ✅ {test_case['description']} - PASSED")
+                
+                # Add individual test result
+                self.test_results.append(TestResult(
+                    test_name=f"database_{test_case['name']}",
+                    passed=test_passed,
+                    error=None if test_passed else f"Database test failed: {test_case['description']}",
+                    execution_time=0.1  # Database queries are fast
+                ))
+            
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"💥 Database GC test failed with exception: {e}")
+            self.validation_errors.append(
+                ScrapingValidationError(
+                    stage="database_gc_verification",
+                    url="database",
+                    error_type="database_connection_failed",
+                    error_message=f"Could not test database GC data: {str(e)}"
+                )
+            )
+            self.test_results.append(TestResult(
+                test_name="database_gc_connection",
+                passed=False,
+                error=str(e),
+                execution_time=(datetime.now() - test_start).total_seconds()
             ))
     
     async def _generate_test_report(self, execution_time: float, passed_tests: int, total_tests: int):
