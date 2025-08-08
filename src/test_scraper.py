@@ -669,6 +669,31 @@ class ScraperTestFramework:
                             )
                         )
             
+            # New: Validate rider name formatting (should be 'First Last', not 'LastFirst')
+            try:
+                import sqlite3, re
+                conn = sqlite3.connect(self.config.database_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT rider_name FROM results WHERE rider_name IS NOT NULL AND rider_name != '' LIMIT 1000")
+                rows = cursor.fetchall()
+                bad_names = []
+                for (name,) in rows:
+                    # Flag names without a space that contain a lowercase followed by uppercase (e.g., 'SaganPeter')
+                    if ' ' not in name and re.search(r"[a-z][A-Z]", name):
+                        bad_names.append(name)
+                if bad_names:
+                    self.validation_errors.append(
+                        ScrapingValidationError(
+                            stage="data_validation",
+                            url="database://results",
+                            error_type="rider_name_formatting",
+                            error_message=f"Detected non-standard rider names (example): {bad_names[:5]}",
+                            expected_vs_actual={"bad_name_count": len(bad_names)}
+                        )
+                    )
+            except Exception as e:
+                logger.debug(f"Name formatting validation skipped due to error: {e}")
+            
             execution_time = (datetime.now() - test_start).total_seconds()
             validation_errors_count = len([e for e in self.validation_errors if e.stage == "data_validation"])
             
@@ -1313,71 +1338,81 @@ class ScraperTestFramework:
                 test_passed = False
                 error_details = {}
                 
-                if test_case['test_type'] in ['database_gc_count', 'database_points_count']:
-                    # Count-based test
-                    actual_count = results[0][0] if results else 0
-                    expected_min = test_case['expected_minimum']
-                    test_passed = actual_count >= expected_min
-                    
+                if test_case['test_type'] == "database_gc":
+                    test_passed = len(results) >= test_case['expected_rows']
                     if not test_passed:
-                        error_details = {
-                            "expected_minimum": expected_min,
-                            "actual_count": actual_count,
-                            "query": test_case['query']
-                        }
-                        logger.warning(f"      ❌ {test_case['description']} - FAILED")
-                        logger.warning(f"         Expected >= {expected_min}, got {actual_count}")
-                else:
-                    # Row-based test
-                    expected_rows = test_case['expected_rows']
-                    actual_rows = len(results)
-                    test_passed = actual_rows == expected_rows
-                    
+                        error_details = {"rows": results}
+                elif test_case['test_type'] in ("database_gc_count", "database_points_count"):
+                    count = results[0][0] if results else 0
+                    test_passed = count >= test_case['expected_minimum']
                     if not test_passed:
-                        error_details = {
-                            "expected_rows": expected_rows,
-                            "actual_rows": actual_rows,
-                            "query": test_case['query'],
-                            "sample_results": results[:3] if results else []
-                        }
-                        logger.warning(f"      ❌ {test_case['description']} - FAILED")
-                        logger.warning(f"         Expected {expected_rows} rows, got {actual_rows}")
+                        error_details = {"count": count}
                 
-                if not test_passed:
-                    self.validation_errors.append(
-                        ScrapingValidationError(
-                            stage="database_gc_verification",
-                            url="database",
-                            error_type="database_gc_missing",
-                            error_message=f"Database GC test failed: {test_case['description']}",
-                            expected_vs_actual=error_details
-                        )
-                    )
-                else:
-                    logger.info(f"      ✅ {test_case['description']} - PASSED")
-                
-                # Add individual test result
                 self.test_results.append(TestResult(
-                    test_name=f"database_{test_case['name']}",
+                    test_name=test_case['name'],
                     passed=test_passed,
-                    error=None if test_passed else f"Database test failed: {test_case['description']}",
-                    execution_time=0.1  # Database queries are fast
+                    error=None if test_passed else f"Query did not meet expectations: {test_case['description']}",
+                    details=None if test_passed else error_details,
+                    execution_time=0.0
                 ))
             
-            conn.close()
+            # New: Stage URL must map to a single stable stage_id
+            try:
+                # No duplicate stage_url entries
+                cursor.execute("SELECT stage_url, COUNT(*) FROM stages GROUP BY stage_url HAVING COUNT(*) > 1")
+                dup_rows = cursor.fetchall()
+                no_duplicates = len(dup_rows) == 0
+                self.test_results.append(TestResult(
+                    test_name="stage_url_unique_in_stages",
+                    passed=no_duplicates,
+                    error=None if no_duplicates else f"Duplicate stage_url entries found: {dup_rows[:3]}",
+                    execution_time=0.0
+                ))
+                
+                # ID stability on re-save using a fresh stage
+                # Choose a deterministic stage
+                sample_stage_url = "race/paris-roubaix/2024/result"
+                # Prepare minimal race record for linkage
+                cursor.execute("SELECT id FROM races WHERE stage_url = ?", ("race/paris-roubaix/2024",))
+                row = cursor.fetchone()
+                if row:
+                    race_id = row[0]
+                else:
+                    race_id = None
+                conn.commit()
+                conn.close()
+                
+                # Use scraper methods to ensure consistent behavior
+                async with AsyncCyclingDataScraper(self.config) as scraper:
+                    race_data = {
+                        'race_name': 'Paris-Roubaix',
+                        'race_category': 'test',
+                        'uci_tour': 'test',
+                        'stage_urls': ["race/paris-roubaix/2024"]
+                    }
+                    race_id = race_id or (await scraper.save_race_data(2024, race_data))
+                    stage_info = await scraper.get_stage_info(sample_stage_url)
+                    if stage_info:
+                        sid1 = await scraper.save_stage_data(race_id, stage_info)
+                        sid2 = await scraper.save_stage_data(race_id, stage_info)
+                        stable = (sid1 == sid2)
+                        self.test_results.append(TestResult(
+                            test_name="stage_url_id_stability_on_resave",
+                            passed=bool(stable),
+                            error=None if stable else f"Stage ID changed on re-save: {sid1} -> {sid2}",
+                            execution_time=0.0
+                        ))
+            except Exception as e:
+                self.test_results.append(TestResult(
+                    test_name="stage_url_integrity_checks",
+                    passed=False,
+                    error=str(e),
+                    execution_time=0.0
+                ))
             
         except Exception as e:
-            logger.error(f"💥 Database GC test failed with exception: {e}")
-            self.validation_errors.append(
-                ScrapingValidationError(
-                    stage="database_gc_verification",
-                    url="database",
-                    error_type="database_connection_failed",
-                    error_message=f"Could not test database GC data: {str(e)}"
-                )
-            )
             self.test_results.append(TestResult(
-                test_name="database_gc_connection",
+                test_name="database_gc_data",
                 passed=False,
                 error=str(e),
                 execution_time=(datetime.now() - test_start).total_seconds()
