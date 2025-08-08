@@ -96,6 +96,21 @@ class AsyncCyclingDataScraper:
         if self.session:
             await self.session.close()
     
+    def format_rider_name(self, raw_name: str) -> str:
+        """Convert 'LastFirst' concatenated names into 'First Last' when applicable."""
+        if not raw_name or len(raw_name) < 2:
+            return raw_name
+        if ' ' in raw_name:
+            return raw_name
+        import re as _re
+        m = _re.search(r'([a-z])([A-Z])', raw_name)
+        if m:
+            split_pos = m.start() + 1
+            last = raw_name[:split_pos]
+            first = raw_name[split_pos:]
+            return f"{first} {last}"
+        return raw_name
+    
     def clean_race_name(self, race_name: str) -> str:
         """Clean and standardize race names by removing edition numbers and year prefixes"""
         if not race_name:
@@ -653,7 +668,8 @@ class AsyncCyclingDataScraper:
                 # Extract rider name and URL (handle URLs with or without leading slash)
                 rider_link = row.find('a', href=lambda x: x and ('rider/' in x or '/rider/' in x))
                 if rider_link:
-                    result['rider_name'] = rider_link.get_text(strip=True)
+                    raw_name = rider_link.get_text(strip=True)
+                    result['rider_name'] = self.format_rider_name(raw_name)
                     result['rider_url'] = rider_link['href']
                 
                 # Extract team name and URL (handle URLs with or without leading slash)
