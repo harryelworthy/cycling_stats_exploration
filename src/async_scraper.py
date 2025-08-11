@@ -246,6 +246,25 @@ class AsyncCyclingDataScraper:
                 )
             ''')
             
+            # Create classifications table for GC, Points, KOM, Youth standings
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS classifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stage_id INTEGER,
+                    rider_name TEXT,
+                    rider_url TEXT,
+                    classification_type TEXT, -- 'gc', 'points', 'kom', 'youth'
+                    rank INTEGER,
+                    time_gap TEXT,
+                    points_total INTEGER,
+                    uci_points INTEGER,
+                    pcs_points INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (stage_id) REFERENCES stages (id),
+                    UNIQUE(stage_id, rider_name, classification_type)
+                )
+            ''')
+            
             await db.commit()
             logger.info(f"Database initialized at {self.config.database_path}")
     
@@ -662,6 +681,9 @@ class AsyncCyclingDataScraper:
                         context={'stage_url': stage_url, 'is_one_day_race': stage_info['is_one_day_race'], 'year': year}
                     )
             
+            # Merge classification data back into results for fixture testing
+            self._merge_classifications_into_results(stage_info)
+            
             return stage_info
             
         except Exception as e:
@@ -749,11 +771,55 @@ class AsyncCyclingDataScraper:
                 if class_table:
                     gc_info[classification] = self.parse_results_table(class_table, secondary=True)
             
+            # Merge classification data back into results for fixture testing
+            self._merge_classifications_into_results(gc_info)
+            
             return gc_info
             
         except Exception as e:
             logger.error(f"Error parsing GC info for {gc_url}: {e}")
             return None
+    
+    def _merge_classifications_into_results(self, stage_info: Dict[str, Any]) -> None:
+        """Merge classification data back into results for fixture testing compatibility"""
+        results = stage_info.get('results', [])
+        if not results:
+            return
+            
+        # Create rider URL to result mapping for fast lookup
+        results_by_rider = {r.get('rider_url'): r for r in results}
+        
+        # Merge GC data
+        for gc_result in stage_info.get('gc', []):
+            rider_url = gc_result.get('rider_url')
+            if rider_url in results_by_rider:
+                result = results_by_rider[rider_url]
+                result['gc_rank'] = gc_result.get('rank') or gc_result.get('position')
+                result['gc_time'] = gc_result.get('time')
+                
+        # Merge Points data  
+        for points_result in stage_info.get('points', []):
+            rider_url = points_result.get('rider_url')
+            if rider_url in results_by_rider:
+                result = results_by_rider[rider_url]
+                result['points_rank'] = points_result.get('rank') or points_result.get('position')
+                result['points_total'] = points_result.get('pcs_points')
+                
+        # Merge KOM data
+        for kom_result in stage_info.get('kom', []):
+            rider_url = kom_result.get('rider_url')
+            if rider_url in results_by_rider:
+                result = results_by_rider[rider_url]
+                result['kom_rank'] = kom_result.get('rank') or kom_result.get('position')
+                result['kom_points'] = kom_result.get('pcs_points')
+                
+        # Merge Youth data
+        for youth_result in stage_info.get('youth', []):
+            rider_url = youth_result.get('rider_url')
+            if rider_url in results_by_rider:
+                result = results_by_rider[rider_url]
+                result['youth_rank'] = youth_result.get('rank') or youth_result.get('position')
+                result['youth_time'] = youth_result.get('time')
     
     def parse_results_table(self, table, secondary=False) -> List[Dict[str, Any]]:
         """Parse a results table from HTML"""
@@ -779,16 +845,21 @@ class AsyncCyclingDataScraper:
                 # Extract team name and URL (handle URLs with or without leading slash)
                 team_link = row.find('a', href=lambda x: x and ('team/' in x or '/team/' in x))
                 if team_link:
-                    result['team_name'] = team_link.get_text(strip=True)
+                    team_name = team_link.get_text(strip=True)
+                    result['team_name'] = team_name
+                    result['team'] = team_name  # Also add 'team' field for compatibility
                     result['team_url'] = team_link['href']
                 
                 # Extract rank (usually first column)
                 if cells:
                     rank_text = cells[0].get_text(strip=True)
                     try:
-                        result['rank'] = int(rank_text) if rank_text.isdigit() else None
+                        rank_value = int(rank_text) if rank_text.isdigit() else None
+                        result['rank'] = rank_value
+                        result['position'] = rank_value  # Also add 'position' field for compatibility
                     except:
                         result['rank'] = None
+                        result['position'] = None
                 
                 # Extract other data based on column headers
                 for i, cell in enumerate(cells):
@@ -984,8 +1055,36 @@ class AsyncCyclingDataScraper:
                         youth_data.get('uci_points')
                     ))
                 
+                # Save classifications data to separate table
+                classifications = [
+                    ('gc', stage_data.get('gc', [])),
+                    ('points', stage_data.get('points', [])), 
+                    ('kom', stage_data.get('kom', [])),
+                    ('youth', stage_data.get('youth', []))
+                ]
+                
+                for classification_type, classification_results in classifications:
+                    for result in classification_results:
+                        if result.get('rider_name'):  # Only save if we have rider data
+                            await db.execute('''
+                                INSERT OR REPLACE INTO classifications (
+                                    stage_id, rider_name, rider_url, classification_type,
+                                    rank, time_gap, points_total, uci_points, pcs_points
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                stage_id,
+                                result.get('rider_name'),
+                                result.get('rider_url'),
+                                classification_type,
+                                result.get('rank'),
+                                result.get('time'),  # For GC this is time gap, for points it's None
+                                result.get('pcs_points') if classification_type == 'points' else None,  # Total points
+                                result.get('uci_points'),
+                                result.get('pcs_points')
+                            ))
+                
                 await db.commit()
-                logger.debug(f"Saved {len(results)} results for stage {stage_id}")
+                logger.debug(f"Saved {len(results)} results and classifications for stage {stage_id}")
                 
             except Exception as e:
                 logger.error(f"Error saving results data: {e}")
