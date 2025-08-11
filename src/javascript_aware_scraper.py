@@ -403,7 +403,8 @@ class JavaScriptAwareScraper:
                 # Extract rider name and URL
                 rider_link = row.find('a', href=lambda x: x and ('rider/' in x or '/rider/' in x))
                 if rider_link:
-                    result['rider_name'] = rider_link.get_text(strip=True)
+                    raw_name = rider_link.get_text(strip=True)
+                    result['rider_name'] = self.format_rider_name(raw_name)
                     result['rider_url'] = rider_link['href']
                 
                 # Extract team name and URL
@@ -644,6 +645,21 @@ class JavaScriptAwareScraper:
             )
             return None
     
+    def format_rider_name(self, raw_name: str) -> str:
+        """Convert 'LastFirst' style into 'First Last' if needed."""
+        if not raw_name or len(raw_name) < 2:
+            return raw_name
+        if ' ' in raw_name:
+            return raw_name
+        import re as _re
+        match = _re.search(r'([a-z])([A-Z])', raw_name)
+        if match:
+            split_pos = match.start() + 1
+            last = raw_name[:split_pos]
+            first = raw_name[split_pos:]
+            return f"{first} {last}"
+        return raw_name
+    
     # Database methods (similar to enhanced scraper)
     async def save_race_data(self, year: int, race_data: Dict[str, Any]) -> Optional[int]:
         """Save race data to SQLite database"""
@@ -664,28 +680,59 @@ class JavaScriptAwareScraper:
                 return None
     
     async def save_stage_data(self, race_id: int, stage_data: Dict[str, Any]) -> Optional[int]:
-        """Save stage data to SQLite database"""
+        """Save stage data to SQLite database without ID churn (no REPLACE)."""
         async with aiosqlite.connect(self.config.database_path) as db:
             try:
-                cursor = await db.execute('''
-                    INSERT OR REPLACE INTO stages 
-                    (race_id, stage_url, is_one_day_race, distance, stage_type, 
-                     winning_attack_length, date, won_how, avg_speed_winner, 
-                     avg_temperature, vertical_meters, profile_icon, profile_score, 
-                     race_startlist_quality_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (race_id, stage_data['stage_url'], stage_data['is_one_day_race'],
-                     stage_data['distance'], stage_data['stage_type'], 
-                     stage_data['winning_attack_length'], stage_data['date'],
-                     stage_data['won_how'], stage_data['avg_speed_winner'],
-                     stage_data['avg_temperature'], stage_data['vertical_meters'],
-                     stage_data['profile_icon'], stage_data['profile_score'],
-                     stage_data['race_startlist_quality_score']))
-                
-                stage_id = cursor.lastrowid
-                await db.commit()
-                return stage_id
-                
+                # Check existing by unique stage_url
+                cur = await db.execute('SELECT id FROM stages WHERE stage_url = ?', (stage_data['stage_url'],))
+                row = await cur.fetchone()
+                if row:
+                    stage_id = row[0]
+                    # Update fields, keep same ID
+                    await db.execute('''
+                        UPDATE stages SET
+                            race_id = ?, is_one_day_race = ?, distance = ?, stage_type = ?,
+                            winning_attack_length = ?, date = ?, won_how = ?, avg_speed_winner = ?,
+                            avg_temperature = ?, vertical_meters = ?, profile_icon = ?, profile_score = ?,
+                            race_startlist_quality_score = ?
+                        WHERE stage_url = ?
+                    ''', (
+                        race_id,
+                        stage_data['is_one_day_race'],
+                        stage_data['distance'],
+                        stage_data['stage_type'],
+                        stage_data['winning_attack_length'],
+                        stage_data['date'],
+                        stage_data['won_how'],
+                        stage_data['avg_speed_winner'],
+                        stage_data['avg_temperature'],
+                        stage_data['vertical_meters'],
+                        stage_data['profile_icon'],
+                        stage_data['profile_score'],
+                        stage_data['race_startlist_quality_score'],
+                        stage_data['stage_url']
+                    ))
+                    await db.commit()
+                    return stage_id
+                else:
+                    # Insert new
+                    cursor = await db.execute('''
+                        INSERT INTO stages 
+                        (race_id, stage_url, is_one_day_race, distance, stage_type, 
+                         winning_attack_length, date, won_how, avg_speed_winner, 
+                         avg_temperature, vertical_meters, profile_icon, profile_score, 
+                         race_startlist_quality_score)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (race_id, stage_data['stage_url'], stage_data['is_one_day_race'],
+                         stage_data['distance'], stage_data['stage_type'], 
+                         stage_data['winning_attack_length'], stage_data['date'],
+                         stage_data['won_how'], stage_data['avg_speed_winner'],
+                         stage_data['avg_temperature'], stage_data['vertical_meters'],
+                         stage_data['profile_icon'], stage_data['profile_score'],
+                         stage_data['race_startlist_quality_score']))
+                    stage_id = cursor.lastrowid
+                    await db.commit()
+                    return stage_id
             except Exception as e:
                 logger.error(f"Error saving stage data: {e}")
                 return None

@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from test_scraper import ScraperTestFramework
-from async_scraper import ScrapingConfig
+from improved_async_scraper import ScrapingConfig
 
 async def main():
     """Run the test framework"""
