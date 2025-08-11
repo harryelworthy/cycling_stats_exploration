@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from improved_async_scraper import ImprovedAsyncCyclingDataScraper as AsyncCyclingDataScraper, ScrapingConfig
+from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
 
 def setup_logging(verbose: bool = False):
     """Setup logging configuration"""

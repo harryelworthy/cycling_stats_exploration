@@ -226,3 +226,16 @@ This project is for educational and research purposes. Please respect ProCycling
 - ✅ Improved error handling and progress tracking
 - ✅ Enhanced testing framework
 - ✅ Better documentation and CLI interface
+
+
+# TODOS
+
+## Critical Scraper Accuracy Issues (Current: 28.5% accuracy)
+- **Priority 1**: Fix missing race metadata (race_name, race_url, race_type) - affects all 8/8 test fixtures
+- **Priority 2**: Fix missing winner field extraction - affects all 8/8 test fixtures  
+- **Priority 3**: Fix missing position field mapping (currently using 'rank' instead of 'position') - affects all 8/8 test fixtures
+- **Priority 4**: Fix incorrect time formatting (missing seconds: "5:25" vs "5:25:58") - affects 6/8 test fixtures
+- **Priority 5**: Fix incorrect rider name formatting ("van der PoelMathieu" vs "Mathieu van der Poel") - affects 4/8 test fixtures
+
+## General Improvements
+- There is no kom/points in some races. Should handle that correctly

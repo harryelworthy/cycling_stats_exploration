@@ -7,12 +7,12 @@ import os
 
 # Add the src directory to the path so we can import the scraper
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from improved_async_scraper import ImprovedAsyncCyclingDataScraper
+from async_scraper import AsyncCyclingDataScraper
 
 async def debug_gc_missing():
     """Debug why GC data is missing from most stages"""
     
-    async with ImprovedAsyncCyclingDataScraper() as scraper:
+    async with AsyncCyclingDataScraper() as scraper:
         # Test a stage that should have GC data but doesn't
         stage_url = "race/tour-de-france/2024/stage-5"
         print(f"Testing stage: {stage_url}")

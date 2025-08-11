@@ -651,6 +651,86 @@ class AsyncCyclingDataScraper:
             )
             return None
     
+    async def get_gc_info(self, gc_url: str) -> Optional[Dict[str, Any]]:
+        """Get General Classification information and results"""
+        base_url = 'https://www.procyclingstats.com/'
+        full_url = urljoin(base_url, gc_url)
+        
+        html_content = await self.make_request(full_url)
+        if not html_content:
+            return None
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            gc_info = {
+                'stage_url': gc_url,
+                'is_one_day_race': False,  # GC is always multi-stage
+                'distance': None,
+                'stage_type': 'gc',  # Mark as GC type
+                'winning_attack_length': None,
+                'date': None,
+                'won_how': None,
+                'avg_speed_winner': None,
+                'avg_temperature': None,
+                'vertical_meters': None,
+                'profile_icon': None,
+                'profile_score': None,
+                'race_startlist_quality_score': None,
+                'results': [],
+                'gc': [],
+                'points': [],
+                'kom': [],
+                'youth': []
+            }
+            
+            # Extract GC metadata from keyvalueList
+            keyvalue_list = soup.find('ul', class_='keyvalueList')
+            if keyvalue_list:
+                for li in keyvalue_list.find_all('li'):
+                    title_div = li.find('div', class_='title')
+                    value_div = li.find('div', class_='value')
+                    
+                    if title_div and value_div:
+                        title = title_div.get_text(strip=True).lower()
+                        value = value_div.get_text(strip=True)
+                        
+                        if 'average speed' in title and 'winner' in title:
+                            try:
+                                gc_info['avg_speed_winner'] = float(value.split()[0])
+                            except:
+                                pass
+                        elif 'won how' in title:
+                            gc_info['won_how'] = value
+                        elif 'startlist quality score' in title:
+                            try:
+                                gc_info['race_startlist_quality_score'] = int(value)
+                            except:
+                                pass
+            
+            # For GC pages, look for the main classification table
+            main_table = soup.find('table', class_='results')
+            if not main_table:
+                # Try alternative table selectors for GC pages
+                main_table = soup.find('table')
+            
+            if main_table:
+                gc_info['results'] = self.parse_results_table(main_table)
+                # Also populate gc field for consistency
+                gc_info['gc'] = self.parse_results_table(main_table, secondary=True)
+            
+            # Extract secondary classifications if they exist
+            for classification in ['points', 'kom', 'youth']:
+                class_table = soup.find('table', {'id': f'{classification}table'})
+                if class_table:
+                    gc_info[classification] = self.parse_results_table(class_table, secondary=True)
+            
+            return gc_info
+            
+        except Exception as e:
+            logger.error(f"Error parsing GC info for {gc_url}: {e}")
+            return None
+    
     def parse_results_table(self, table, secondary=False) -> List[Dict[str, Any]]:
         """Parse a results table from HTML"""
         results = []

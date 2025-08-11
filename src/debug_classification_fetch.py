@@ -10,12 +10,12 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 
 # Add the src directory to the path so we can import the scraper
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from improved_async_scraper import ImprovedAsyncCyclingDataScraper
+from async_scraper import AsyncCyclingDataScraper
 
 async def debug_classification_fetch():
     """Debug the classification fetching process in detail"""
     
-    async with ImprovedAsyncCyclingDataScraper() as scraper:
+    async with AsyncCyclingDataScraper() as scraper:
         # Test the specific classification URLs
         test_urls = [
             "race/tour-de-france/2024/gc",  # Final GC

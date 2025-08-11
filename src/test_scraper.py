@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import aiosqlite
 
-from improved_async_scraper import ImprovedAsyncCyclingDataScraper as AsyncCyclingDataScraper, ScrapingConfig
+from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
 
 # Configure detailed test logging
 logging.basicConfig(

@@ -62,6 +62,9 @@ reports/*.txt
 src/reports/*.json
 src/reports/*.txt
 
+# Test fixture expected JSON files
+tests/fixtures/expected/*.json
+
 # Test databases
 test_cycling_data.db
 
