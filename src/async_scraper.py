@@ -13,10 +13,34 @@ from urllib.parse import urljoin
 import time
 from contextlib import asynccontextmanager
 
-# Import enhanced error logging and historical data handler
-from enhanced_error_logger import enhanced_logger
-from historical_data_handler import HistoricalDataHandler
+# Import rider scraper
 from rider_scraper import RiderProfileScraper
+
+# Simple error logging (consolidated from enhanced_error_logger.py)
+class SimpleErrorLogger:
+    def log_scraping_error(self, stage: str, url: str, error: Exception, html_content=None, expected_elements=None, context=None):
+        logger.error(f"SCRAPING ERROR - Stage: {stage}, URL: {url}, Error: {type(error).__name__} - {str(error)}")
+
+# Historical data handling (consolidated from historical_data_handler.py)  
+class HistoricalDataHandler:
+    @staticmethod
+    def is_historical_year(year: int) -> bool:
+        return year < 1980
+    
+    @staticmethod
+    def adjust_expectations_for_year(year: int) -> Dict[str, Any]:
+        if year < 1920:
+            return {'min_races_expected': 1, 'expect_team_data': False, 'expect_uci_points': False}
+        elif year < 1950:
+            return {'min_races_expected': 3, 'expect_team_data': True, 'expect_uci_points': False}
+        elif year < 1980:
+            return {'min_races_expected': 8, 'expect_team_data': True, 'expect_uci_points': False}
+        else:
+            return {'min_races_expected': 15, 'expect_team_data': True, 'expect_uci_points': True}
+
+# Global instances
+enhanced_logger = SimpleErrorLogger()
+historical_handler = HistoricalDataHandler()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
