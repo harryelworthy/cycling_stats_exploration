@@ -71,3 +71,5 @@ test_cycling_data.db
 # Environment variables
 .env
 .env.local
+
+test_database.ipynb
