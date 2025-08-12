@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 
 # Import rider scraper
-from rider_scraper import RiderProfileScraper
+from src.rider_scraper import RiderProfileScraper
 
 # Simple error logging (consolidated from enhanced_error_logger.py)
 class SimpleErrorLogger:
@@ -415,13 +415,41 @@ class AsyncCyclingDataScraper:
                 href = link['href']
                 clean_href = href[1:] if href.startswith('/') else href
                 
-                # Only include URLs that belong to this specific race
-                if (clean_href.startswith(base_race_prefix) and 
-                    ('/stage-' in href or href.endswith('/result')) and
-                    '/route/' not in href and '/startlist' not in href):
-                    stage_urls.append(clean_href)
+                # Include URLs that belong to this specific race
+                if clean_href.startswith(base_race_prefix):
+                    # Include stage results, main result, and classification pages
+                    if (('/stage-' in href or href.endswith('/result') or 
+                         href.endswith('/gc') or href.endswith('/points') or 
+                         href.endswith('/kom') or href.endswith('/youth') or
+                         '/stage-' in href and ('-gc' in href or '-points' in href or '-kom' in href or '-youth' in href)) and
+                        '/route/' not in href and '/startlist' not in href and '/history' not in href):
+                        stage_urls.append(clean_href)
             
             # Remove duplicates and sort
+            stage_urls = list(set(stage_urls))
+            
+            # Generate systematic mid-stage classification URLs
+            # Extract stage numbers from discovered stage URLs
+            stage_numbers = []
+            for url in stage_urls:
+                if '/stage-' in url and not any(suffix in url for suffix in ['-gc', '-points', '-kom', '-youth']):
+                    try:
+                        # Extract stage number from URLs like "race/giro-d-italia/2024/stage-8"
+                        stage_part = url.split('/stage-')[1]
+                        stage_num = int(stage_part.split('/')[0].split('-')[0])
+                        stage_numbers.append(stage_num)
+                    except (ValueError, IndexError):
+                        continue
+            
+            # Generate mid-stage classification URLs for each stage
+            classifications = ['gc', 'points', 'kom', 'youth']
+            for stage_num in stage_numbers:
+                base_stage_url = f"{race_url}/stage-{stage_num}"
+                for classification in classifications:
+                    classification_url = f"{base_stage_url}-{classification}"
+                    stage_urls.append(classification_url)
+            
+            # Remove duplicates again after adding generated URLs
             stage_urls = list(set(stage_urls))
             
             # If no stages found, use the race result page
@@ -589,6 +617,14 @@ class AsyncCyclingDataScraper:
                                     stage_info['avg_temperature'] = float(temp_str)
                             except:
                                 pass
+                        
+                        # Extract race category
+                        elif 'race category' in title:
+                            stage_info['race_category'] = value
+                        
+                        # Extract classification  
+                        elif 'classification' in title and value.strip():
+                            stage_info['classification'] = value
             
             # Check if this is a jersey classification page
             is_gc_page = stage_url.endswith('/gc')
@@ -596,6 +632,16 @@ class AsyncCyclingDataScraper:
             is_kom_page = stage_url.endswith('/kom')
             is_youth_page = stage_url.endswith('/youth')
             is_jersey_page = is_gc_page or is_points_page or is_kom_page or is_youth_page
+            
+            # Set classification type for jersey pages
+            if is_gc_page:
+                stage_info['classification_type'] = 'gc'
+            elif is_points_page:
+                stage_info['classification_type'] = 'points'
+            elif is_kom_page:
+                stage_info['classification_type'] = 'kom'
+            elif is_youth_page:
+                stage_info['classification_type'] = 'youth'
             
             if is_jersey_page:
                 # For jersey classification pages, look for the specific classification table
