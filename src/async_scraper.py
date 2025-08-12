@@ -236,14 +236,6 @@ class AsyncCyclingDataScraper:
                     uci_points INTEGER,
                     pcs_points INTEGER,
                     age INTEGER,
-                    gc_rank INTEGER,
-                    gc_uci_points INTEGER,
-                    points_rank INTEGER,
-                    points_uci_points INTEGER,
-                    kom_rank INTEGER,
-                    kom_uci_points INTEGER,
-                    youth_rank INTEGER,
-                    youth_uci_points INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (stage_id) REFERENCES stages (id)
                 )
@@ -524,11 +516,23 @@ class AsyncCyclingDataScraper:
             is_one_day_race = '/result' in stage_url and '/stage-' not in stage_url and '/gc' not in stage_url
             race_type = "one-day" if is_one_day_race else "stage_race"
             
+            # Extract year from URL (e.g., "race/tour-de-france/1986/gc" -> 1986)
+            year = None
+            try:
+                url_parts = stage_url.split('/')
+                for part in url_parts:
+                    if part.isdigit() and 1800 <= int(part) <= 2100:  # Valid year range
+                        year = int(part)
+                        break
+            except:
+                pass
+            
             stage_info = {
                 'stage_url': stage_url,
                 'race_name': race_name,
                 'race_url': stage_url,
                 'race_type': race_type,
+                'year': year,
                 'is_one_day_race': is_one_day_race,
                 'distance': None,
                 'stage_type': None,
@@ -625,6 +629,25 @@ class AsyncCyclingDataScraper:
                         # Extract classification  
                         elif 'classification' in title and value.strip():
                             stage_info['classification'] = value
+                        
+                        # Extract departure location
+                        elif 'departure' in title:
+                            stage_info['departure'] = value
+                        
+                        # Extract arrival location
+                        elif 'arrival' in title:
+                            stage_info['arrival'] = value
+                        
+                        # Extract startlist quality score
+                        elif 'startlist quality score' in title:
+                            try:
+                                # Extract numeric value, handling formats like "658 (658)" or "1758"
+                                import re
+                                score_match = re.search(r'(\d+)', value)
+                                if score_match:
+                                    stage_info['startlist_quality_score'] = int(score_match.group(1))
+                            except:
+                                pass
             
             # Check if this is a jersey classification page
             is_gc_page = stage_url.endswith('/gc')
@@ -742,15 +765,20 @@ class AsyncCyclingDataScraper:
                         context={'stage_url': stage_url, 'is_one_day_race': stage_info['is_one_day_race'], 'year': year}
                     )
             
-            # Merge classification data back into results for fixture testing
-            self._merge_classifications_into_results(stage_info)
+            # Classification data is saved separately in classifications table
             
-            # Calculate winner (first position rider)
+            # Calculate winner (first position rider) and total finishers
             if stage_info['results']:
                 first_result = stage_info['results'][0]
                 stage_info['winner'] = first_result.get('rider_name')
+                
+                # Count only riders who finished (not DNF, DNS, DSQ, OTL)
+                finished_riders = [r for r in stage_info['results'] 
+                                 if r.get('status', 'FINISHED') == 'FINISHED']
+                stage_info['total_finishers'] = len(finished_riders)
             else:
                 stage_info['winner'] = None
+                stage_info['total_finishers'] = 0
             
             return stage_info
             
@@ -844,19 +872,36 @@ class AsyncCyclingDataScraper:
             raw_race_name = race_name_elem.get_text(strip=True) if race_name_elem else None
             race_name = self.clean_race_name(raw_race_name) if raw_race_name else None
             
+            # Extract year from URL
+            year = None
+            try:
+                url_parts = gc_url.split('/')
+                for part in url_parts:
+                    if part.isdigit() and 1800 <= int(part) <= 2100:  # Valid year range
+                        year = int(part)
+                        break
+            except:
+                pass
+            
             gc_info['race_name'] = race_name
             gc_info['race_url'] = gc_url
             gc_info['race_type'] = "stage_race"  # GC pages are always for stage races
+            gc_info['year'] = year
             
-            # Merge classification data back into results for fixture testing
-            self._merge_classifications_into_results(gc_info)
+            # Classification data is saved separately in classifications table
             
-            # Calculate winner (first position rider in GC)
+            # Calculate winner (first position rider in GC) and total finishers
             if gc_info['results']:
                 first_result = gc_info['results'][0]
                 gc_info['winner'] = first_result.get('rider_name')
+                
+                # Count only riders who finished (not DNF, DNS, DSQ, OTL)
+                finished_riders = [r for r in gc_info['results'] 
+                                 if r.get('status', 'FINISHED') == 'FINISHED']
+                gc_info['total_finishers'] = len(finished_riders)
             else:
                 gc_info['winner'] = None
+                gc_info['total_finishers'] = 0
             
             return gc_info
             
@@ -864,46 +909,6 @@ class AsyncCyclingDataScraper:
             logger.error(f"Error parsing GC info for {gc_url}: {e}")
             return None
     
-    def _merge_classifications_into_results(self, stage_info: Dict[str, Any]) -> None:
-        """Merge classification data back into results for fixture testing compatibility"""
-        results = stage_info.get('results', [])
-        if not results:
-            return
-            
-        # Create rider URL to result mapping for fast lookup
-        results_by_rider = {r.get('rider_url'): r for r in results}
-        
-        # Merge GC data
-        for gc_result in stage_info.get('gc', []):
-            rider_url = gc_result.get('rider_url')
-            if rider_url in results_by_rider:
-                result = results_by_rider[rider_url]
-                result['gc_rank'] = gc_result.get('rank') or gc_result.get('position')
-                result['gc_time'] = gc_result.get('time')
-                
-        # Merge Points data  
-        for points_result in stage_info.get('points', []):
-            rider_url = points_result.get('rider_url')
-            if rider_url in results_by_rider:
-                result = results_by_rider[rider_url]
-                result['points_rank'] = points_result.get('rank') or points_result.get('position')
-                result['points_total'] = points_result.get('pcs_points')
-                
-        # Merge KOM data
-        for kom_result in stage_info.get('kom', []):
-            rider_url = kom_result.get('rider_url')
-            if rider_url in results_by_rider:
-                result = results_by_rider[rider_url]
-                result['kom_rank'] = kom_result.get('rank') or kom_result.get('position')
-                result['kom_points'] = kom_result.get('pcs_points')
-                
-        # Merge Youth data
-        for youth_result in stage_info.get('youth', []):
-            rider_url = youth_result.get('rider_url')
-            if rider_url in results_by_rider:
-                result = results_by_rider[rider_url]
-                result['youth_rank'] = youth_result.get('rank') or youth_result.get('position')
-                result['youth_time'] = youth_result.get('time')
     
     def parse_results_table(self, table, secondary=False) -> List[Dict[str, Any]]:
         """Parse a results table from HTML"""
@@ -1139,29 +1144,15 @@ class AsyncCyclingDataScraper:
         """Save results data to SQLite database"""
         async with aiosqlite.connect(self.config.database_path) as db:
             try:
-                # Prepare results with secondary classifications
+                # Save results data (without classification fields)
                 results = stage_data.get('results', [])
-                gc_results = {r.get('rider_url'): r for r in stage_data.get('gc', [])}
-                points_results = {r.get('rider_url'): r for r in stage_data.get('points', [])}
-                kom_results = {r.get('rider_url'): r for r in stage_data.get('kom', [])}
-                youth_results = {r.get('rider_url'): r for r in stage_data.get('youth', [])}
                 
                 for result in results:
-                    rider_url = result.get('rider_url')
-                    
-                    # Merge secondary classification data
-                    gc_data = gc_results.get(rider_url, {})
-                    points_data = points_results.get(rider_url, {})
-                    kom_data = kom_results.get(rider_url, {})
-                    youth_data = youth_results.get(rider_url, {})
-                    
                     await db.execute('''
                         INSERT OR IGNORE INTO results (
                             stage_id, rider_name, rider_url, team_name, team_url,
-                            rank, status, time, uci_points, pcs_points, age,
-                            gc_rank, gc_uci_points, points_rank, points_uci_points,
-                            kom_rank, kom_uci_points, youth_rank, youth_uci_points
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            rank, status, time, uci_points, pcs_points, age
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         stage_id,
                         result.get('rider_name'),
@@ -1173,15 +1164,7 @@ class AsyncCyclingDataScraper:
                         result.get('time'),
                         result.get('uci_points'),
                         result.get('pcs_points'),
-                        result.get('age'),
-                        gc_data.get('rank'),
-                        gc_data.get('uci_points'),
-                        points_data.get('rank'),
-                        points_data.get('uci_points'),
-                        kom_data.get('rank'),
-                        kom_data.get('uci_points'),
-                        youth_data.get('rank'),
-                        youth_data.get('uci_points')
+                        result.get('age')
                     ))
                 
                 # Save classifications data to separate table
