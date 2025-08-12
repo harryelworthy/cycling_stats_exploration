@@ -215,7 +215,7 @@ class AsyncCyclingDataScraper:
                     vertical_meters INTEGER,
                     profile_icon TEXT,
                     profile_score INTEGER,
-                    race_startlist_quality_score INTEGER,
+                    startlist_quality_score INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (race_id) REFERENCES races (id)
                 )
@@ -433,9 +433,15 @@ class AsyncCyclingDataScraper:
                     except (ValueError, IndexError):
                         continue
             
-            # Generate mid-stage classification URLs for each stage
+            # Generate mid-stage classification URLs for each stage (except final stage)
             classifications = ['gc', 'points', 'kom', 'youth']
+            max_stage = max(stage_numbers) if stage_numbers else 0
             for stage_num in stage_numbers:
+                # Skip generating stage-specific classification URLs for the final stage
+                # The final stage uses race-level URLs like /gc, /points, etc.
+                if stage_num == max_stage:
+                    continue
+                    
                 base_stage_url = f"{race_url}/stage-{stage_num}"
                 for classification in classifications:
                     classification_url = f"{base_stage_url}-{classification}"
@@ -1314,7 +1320,7 @@ class AsyncCyclingDataScraper:
                         race_id, stage_url, is_one_day_race, distance, stage_type,
                         winning_attack_length, date, won_how, avg_speed_winner,
                         avg_temperature, vertical_meters, profile_icon, profile_score,
-                        race_startlist_quality_score
+                        startlist_quality_score
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     race_id,
@@ -1330,7 +1336,7 @@ class AsyncCyclingDataScraper:
                     stage_data['vertical_meters'],
                     stage_data['profile_icon'],
                     stage_data['profile_score'],
-                    stage_data['race_startlist_quality_score']
+                    stage_data.get('startlist_quality_score')
                 ))
                 
                 stage_id = stage_cursor.lastrowid

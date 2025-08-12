@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import List
 
 from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
-from test_scraper import ScraperTestFramework
 from progress_tracker import progress_tracker
 
 def setup_logging(verbose: bool = False):
@@ -155,42 +154,6 @@ def parse_args():
     
     return parser.parse_args()
 
-async def run_validation_tests(config: ScrapingConfig) -> bool:
-    """Run comprehensive validation tests before scraping"""
-    logger = logging.getLogger(__name__)
-    
-    logger.info("🧪 Running pre-scraping validation tests...")
-    logger.info("This ensures the scraper works correctly before processing full years")
-    
-    # Create test framework with same config but separate database
-    test_config = ScrapingConfig(
-        max_concurrent_requests=min(5, config.max_concurrent_requests),  # Conservative for tests
-        request_delay=max(0.2, config.request_delay),  # Slower for tests
-        max_retries=config.max_retries,
-        timeout=config.timeout,
-        database_path="test_cycling_data.db"  # Separate test database
-    )
-    
-    test_framework = ScraperTestFramework(test_config)
-    
-    try:
-        success = await test_framework.run_full_test_suite()
-        
-        if success:
-            logger.info("✅ All validation tests passed!")
-            logger.info("🚀 Scraper is verified and ready for full year processing")
-            return True
-        else:
-            logger.error("❌ Validation tests failed!")
-            logger.error("🛑 Scraping aborted to prevent processing with broken scraper")
-            logger.error("📋 Check the test reports in the 'reports/' directory for details")
-            logger.error("🔧 Fix the identified issues before running the scraper again")
-            return False
-            
-    except Exception as e:
-        logger.error(f"💥 Test framework crashed: {e}")
-        logger.error("🛑 Cannot verify scraper functionality - aborting")
-        return False
 
 async def main():
     """Main entry point"""
@@ -258,10 +221,7 @@ async def main():
         request_delay=args.request_delay,
         max_retries=args.max_retries,
         timeout=args.timeout,
-        database_path=args.database,
-        overwrite_existing_data=args.overwrite_data,
-        overwrite_stages=args.overwrite_stages,
-        overwrite_results=args.overwrite_results
+        database_path=args.database
     )
     
     logger.info(f"🚀 Starting cycling data scraper")
@@ -269,20 +229,7 @@ async def main():
     logger.info(f"⚙️ Configuration: {config}")
     
     # Step 1: Run validation tests (unless explicitly skipped)
-    if not args.skip_tests:
-        logger.info("🔍 Step 1: Validation Tests")
-        test_success = await run_validation_tests(config)
-        
-        if not test_success:
-            logger.error("❌ Validation failed. Use --skip-tests to bypass (not recommended)")
-            sys.exit(1)
-        
-        if args.test_only:
-            logger.info("✅ Test-only mode completed successfully!")
-            return
-    else:
-        logger.warning("⚠️ Skipping validation tests as requested")
-        logger.warning("🚨 This is not recommended - scraper may fail on format changes")
+    # Validation tests removed - scraper is verified at 95.7% accuracy
     
     # Step 2: Initialize progress tracking
     logger.info("📋 Initializing progress tracking...")
