@@ -810,6 +810,7 @@ class AsyncCyclingDataScraper:
                 'is_one_day_race': False,  # GC is always multi-stage
                 'distance': None,
                 'stage_type': 'gc',  # Mark as GC type
+                'classification_type': 'gc',  # Set classification type
                 'winning_attack_length': None,
                 'date': None,
                 'won_how': None,
@@ -819,11 +820,17 @@ class AsyncCyclingDataScraper:
                 'profile_icon': None,
                 'profile_score': None,
                 'race_startlist_quality_score': None,
+                'total_race_distance': 0,
+                'race_category': None,
+                'uci_classification': None,
+                'departure': None,
+                'stage_21_winner': None,
                 'results': [],
                 'gc': [],
                 'points': [],
                 'kom': [],
-                'youth': []
+                'youth': [],
+                'point_classification': []
             }
             
             # Extract GC metadata from keyvalueList
@@ -849,12 +856,51 @@ class AsyncCyclingDataScraper:
                                 gc_info['race_startlist_quality_score'] = int(value)
                             except:
                                 pass
+                        elif 'date' in title:
+                            gc_info['date'] = value
+                        elif 'total distance' in title or 'race distance' in title:
+                            try:
+                                # Extract numeric value from "3,408.5 km"
+                                distance_str = ''.join(c for c in value if c.isdigit() or c == '.' or c == ',')
+                                distance_str = distance_str.replace(',', '')
+                                if distance_str:
+                                    gc_info['total_race_distance'] = float(distance_str)
+                            except:
+                                pass
+                        elif 'race category' in title:
+                            gc_info['race_category'] = value
+                        elif 'uci classification' in title or 'classification' in title:
+                            gc_info['uci_classification'] = value
+                        elif 'departure' in title or 'start' in title:
+                            gc_info['departure'] = value
+                        elif 'avg. speed winner' in title or 'average speed winner' in title or 'avg speed winner' in title:
+                            try:
+                                # Extract numeric value from "41.1739 km/h"
+                                speed_str = ''.join(c for c in value if c.isdigit() or c == '.')
+                                if speed_str:
+                                    gc_info['avg_speed_winner'] = float(speed_str)
+                            except:
+                                pass
+                        elif 'stage 21 winner' in title or 'final stage winner' in title:
+                            gc_info['stage_21_winner'] = value
             
-            # For GC pages, look for the main classification table
-            main_table = soup.find('table', class_='results')
+            # For GC pages, find the active tab container (not hidden) and get its table
+            main_table = None
+            
+            # Look for the active tab - it should not have "hide" class
+            active_tabs = soup.find_all('div', class_='resTab')
+            for tab in active_tabs:
+                # Skip hidden tabs
+                if 'hide' not in tab.get('class', []):
+                    # Get the table inside this active tab
+                    table = tab.find('table', class_='results')
+                    if table:
+                        main_table = table
+                        break
+            
+            # Fallback: just get the first non-hidden table if no tabs found
             if not main_table:
-                # Try alternative table selectors for GC pages
-                main_table = soup.find('table')
+                main_table = soup.find('table', class_='results')
             
             if main_table:
                 gc_info['results'] = self.parse_results_table(main_table)
@@ -866,6 +912,9 @@ class AsyncCyclingDataScraper:
                 class_table = soup.find('table', {'id': f'{classification}table'})
                 if class_table:
                     gc_info[classification] = self.parse_results_table(class_table, secondary=True)
+                    # Also populate point_classification for fixture compatibility
+                    if classification == 'points':
+                        gc_info['point_classification'] = self.parse_results_table(class_table, secondary=True)
             
             # Extract race metadata from the page
             race_name_elem = soup.find('h1')
