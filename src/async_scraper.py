@@ -148,6 +148,9 @@ class AsyncCyclingDataScraper:
         # Remove edition numbers (e.g., "102nd", "117th", "1st", "21st")
         name = re.sub(r'(\d+)(st|nd|rd|th)', '', name)
         
+        # Remove classification suffixes (e.g., "(1.UWT)", "(WT)", "(SPP)", "(2.UWT)")
+        name = re.sub(r'\([^)]*\)$', '', name)
+        
         # Standardize race name components
         replacements = {
             # Standardize spacing and dashes
@@ -484,9 +487,21 @@ class AsyncCyclingDataScraper:
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
+            # Extract race metadata
+            race_name_elem = soup.find('h1')
+            raw_race_name = race_name_elem.get_text(strip=True) if race_name_elem else None
+            race_name = self.clean_race_name(raw_race_name) if raw_race_name else None
+            
+            # Determine race type based on URL structure
+            is_one_day_race = '/result' in stage_url and '/stage-' not in stage_url and '/gc' not in stage_url
+            race_type = "one-day" if is_one_day_race else "stage_race"
+            
             stage_info = {
                 'stage_url': stage_url,
-                'is_one_day_race': '/result' in stage_url and '/stage-' not in stage_url,
+                'race_name': race_name,
+                'race_url': stage_url,
+                'race_type': race_type,
+                'is_one_day_race': is_one_day_race,
                 'distance': None,
                 'stage_type': None,
                 'winning_attack_length': None,
@@ -684,6 +699,13 @@ class AsyncCyclingDataScraper:
             # Merge classification data back into results for fixture testing
             self._merge_classifications_into_results(stage_info)
             
+            # Calculate winner (first position rider)
+            if stage_info['results']:
+                first_result = stage_info['results'][0]
+                stage_info['winner'] = first_result.get('rider_name')
+            else:
+                stage_info['winner'] = None
+            
             return stage_info
             
         except Exception as e:
@@ -771,8 +793,24 @@ class AsyncCyclingDataScraper:
                 if class_table:
                     gc_info[classification] = self.parse_results_table(class_table, secondary=True)
             
+            # Extract race metadata from the page
+            race_name_elem = soup.find('h1')
+            raw_race_name = race_name_elem.get_text(strip=True) if race_name_elem else None
+            race_name = self.clean_race_name(raw_race_name) if raw_race_name else None
+            
+            gc_info['race_name'] = race_name
+            gc_info['race_url'] = gc_url
+            gc_info['race_type'] = "stage_race"  # GC pages are always for stage races
+            
             # Merge classification data back into results for fixture testing
             self._merge_classifications_into_results(gc_info)
+            
+            # Calculate winner (first position rider in GC)
+            if gc_info['results']:
+                first_result = gc_info['results'][0]
+                gc_info['winner'] = first_result.get('rider_name')
+            else:
+                gc_info['winner'] = None
             
             return gc_info
             
@@ -838,8 +876,22 @@ class AsyncCyclingDataScraper:
                 # Extract rider name and URL (handle URLs with or without leading slash)
                 rider_link = row.find('a', href=lambda x: x and ('rider/' in x or '/rider/' in x))
                 if rider_link:
-                    raw_name = rider_link.get_text(strip=True)
-                    result['rider_name'] = self.format_rider_name(raw_name)
+                    # Check for structured name format: <span class="uppercase">LASTNAME</span> Firstname
+                    uppercase_span = rider_link.find('span', class_='uppercase')
+                    if uppercase_span:
+                        lastname = uppercase_span.get_text(strip=True)
+                        # Get full text and remove the uppercase part to get firstname
+                        full_text = rider_link.get_text(strip=True)
+                        firstname = full_text.replace(lastname, '').strip()
+                        if firstname and lastname:
+                            result['rider_name'] = f"{firstname} {lastname}"
+                        else:
+                            result['rider_name'] = full_text
+                    else:
+                        # Fallback to existing logic for other formats
+                        raw_name = rider_link.get_text(strip=True)
+                        result['rider_name'] = self.format_rider_name(raw_name)
+                    
                     result['rider_url'] = rider_link['href']
                 
                 # Extract team name and URL (handle URLs with or without leading slash)
@@ -861,21 +913,55 @@ class AsyncCyclingDataScraper:
                         result['rank'] = None
                         result['position'] = None
                 
+                # Extract specialty from specialty column  
+                specialty_cell = row.find('td', class_='specialty')
+                if specialty_cell:
+                    specialty_span = specialty_cell.find('span', class_='fs10')
+                    if specialty_span:
+                        specialty_text = specialty_span.get_text(strip=True)
+                        if specialty_text:
+                            result['specialty'] = specialty_text
+
+                # Extract age from age column
+                age_cell = row.find('td', class_='age')
+                if age_cell:
+                    age_text = age_cell.get_text(strip=True)
+                    if age_text.isdigit() and 15 <= int(age_text) <= 60:
+                        result['age'] = int(age_text)
+
+                # Extract bib from bib column
+                bib_cell = row.find('td', class_='bibs')
+                if bib_cell:
+                    bib_text = bib_cell.get_text(strip=True)
+                    if bib_text.isdigit():
+                        result['bib'] = int(bib_text)
+                
                 # Extract other data based on column headers
                 for i, cell in enumerate(cells):
                     text = cell.get_text(strip=True)
                     cell_classes = cell.get('class', [])
                     
-                    # Time column (look for time format with colons)
-                    if ':' in text and ('.' in text or text.count(':') >= 2):
-                        # Clean up time format (remove duplicates like "4:434:43")
-                        time_parts = text.split(':')
-                        if len(time_parts) >= 2:
-                            # Take the first part if it looks like a valid time
-                            if len(time_parts[0]) <= 2 and time_parts[0].isdigit():
-                                result['time'] = text.split(':')[0] + ':' + text.split(':')[1]
-                            else:
-                                result['time'] = text
+                    # Time column - check for time cell class or time format 
+                    if 'time' in cell_classes or (':' in text and any(c.isdigit() for c in text)):
+                        # Look for hidden span with full time first
+                        hidden_time_span = cell.find('span', class_='hide')
+                        if hidden_time_span:
+                            time_text = hidden_time_span.get_text(strip=True)
+                            if ':' in time_text:
+                                result['time'] = time_text
+                        elif ':' in text:
+                            # Fallback to visible text, clean up if needed
+                            time_parts = text.split(':')
+                            if len(time_parts) >= 2:
+                                # For times like "5:25" try to add seconds if missing
+                                if len(time_parts) == 2 and time_parts[0].isdigit() and time_parts[1].isdigit():
+                                    # Check if this looks like minutes:seconds (likely missing hour)
+                                    if int(time_parts[0]) < 10 and int(time_parts[1]) < 60:
+                                        result['time'] = f"{time_parts[0]}:{time_parts[1]}:00"
+                                    else:
+                                        result['time'] = text
+                                else:
+                                    result['time'] = text
                     
                     # UCI Points column - specifically look for cells with 'uci_pnt' class
                     elif 'uci_pnt' in cell_classes and text.isdigit() and int(text) > 0:
@@ -904,9 +990,6 @@ class AsyncCyclingDataScraper:
                                 # For secondary classifications, this is UCI points
                                 result['uci_points'] = int(text)
                     
-                    # Age column (typically 2-digit number)
-                    elif text.isdigit() and 18 <= int(text) <= 50:
-                        result['age'] = int(text)
                     
                     # Status indicators
                     elif text.upper() in ['DNF', 'DNS', 'DSQ', 'OTL']:
