@@ -53,8 +53,8 @@ Adjust: `python src/main.py YEAR --max-concurrent 10 --request-delay 0.2`
 
 ## Current Status
 
-### Scraper Accuracy: **85.1%** ✅  
-*Major improvements completed - up from 36.1% initial accuracy*
+### Scraper Accuracy: **95.7%** 🚀  
+*Approaching 100% - up from 36.1% initial accuracy*
 
 **Recent Achievements:**
 - ✅ **Race metadata extraction**: Now extracts race_name, race_url, race_type, winner  
@@ -64,16 +64,19 @@ Adjust: `python src/main.py YEAR --max-concurrent 10 --request-delay 0.2`
 - ✅ **GC/Classification URLs**: Systematic discovery of GC, points, KOM, youth classifications  
 - ✅ **Database normalization**: Separated results vs classifications data  
 - ✅ **GC table selection**: Improved parsing to get correct GC winners vs stage winners
+- ✅ **Jersey leaders**: Extract gc_leader, points_leader, youth_leader for stage races
+- ✅ **Jersey extraction**: Identify yellow jersey holders in GC results
 
 **Individual Fixture Performance:**
-- Paris-Roubaix 2024: **95.2%** accuracy
-- Amstel Gold Race 2015: **95.0%** accuracy  
-- Milano-Sanremo 1985: **89.7%** accuracy
-- Giro d'Italia 2013 GC: **85.7%** accuracy
-- Tour de France 2016 Stage 14: **80.9%** accuracy
+- Paris-Roubaix 2024: **100.0%** accuracy ✅
+- Amstel Gold Race 2015: **100.0%** accuracy ✅
+- Tour de France 2016 Stage 14: **100.0%** accuracy ✅
+- Milano-Sanremo 1985: **100.0%** accuracy ✅
+- Giro d'Italia 2013 GC: **95.0%** accuracy
+- Paris-Roubaix 1905: **90.9%** accuracy
+- Tour de France 1986 GC: **84.6%** accuracy
+- Tour de France 1905 GC: **81.2%** accuracy
 
-### Remaining Minor Issues
-- Missing metadata fields: `edition`, `historical`, `notes` (test-specific)
-- Missing `startlist_quality_score` extraction (4 fixtures)  
-- Some `time_gap` formatting for GC results
-- Minor `total_finishers` count discrepancies
+### Remaining Minor Issues  
+- Missing `time_gap` for some GC results
+- Missing `point_classification` arrays for GC pages
