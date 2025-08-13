@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 
 # Import rider scraper
-from src.rider_scraper import RiderProfileScraper
+from rider_scraper import RiderProfileScraper
 
 # Simple error logging (consolidated from enhanced_error_logger.py)
 class SimpleErrorLogger:
@@ -54,7 +54,7 @@ class ScrapingConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     timeout: int = 30
-    database_path: str = "data/cycling_data.db"
+    database_path: str = "../data/cycling_data.db"
     
 @dataclass
 class ScrapingStats:
@@ -245,18 +245,27 @@ class AsyncCyclingDataScraper:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS classifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    race_id INTEGER,
                     stage_id INTEGER,
+                    stage_number INTEGER,
+                    classification_url TEXT,
                     rider_name TEXT,
                     rider_url TEXT,
+                    team_name TEXT,
+                    team_url TEXT,
                     classification_type TEXT, -- 'gc', 'points', 'kom', 'youth'
                     rank INTEGER,
                     time_gap TEXT,
                     points_total INTEGER,
                     uci_points INTEGER,
                     pcs_points INTEGER,
+                    age INTEGER,
+                    specialty TEXT,
+                    status TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (race_id) REFERENCES races (id),
                     FOREIGN KEY (stage_id) REFERENCES stages (id),
-                    UNIQUE(stage_id, rider_name, classification_type)
+                    UNIQUE(race_id, stage_number, rider_name, classification_type)
                 )
             ''')
             
@@ -477,11 +486,27 @@ class AsyncCyclingDataScraper:
                         context={'race_url': race_url, 'year': year}
                     )
             
+            # Separate main stage URLs from classification URLs
+            main_stage_urls = []
+            classification_urls = []
+            
+            for url in stage_urls:
+                # Classification URLs end with specific patterns
+                if (url.endswith('/gc') or url.endswith('/points') or 
+                    url.endswith('/kom') or url.endswith('/youth') or
+                    '/stage-' in url and ('-gc' in url or '-points' in url or '-kom' in url or '-youth' in url)):
+                    classification_urls.append(url)
+                else:
+                    # Main stage URLs (stage results, race results)
+                    main_stage_urls.append(url)
+            
             race_info = {
                 'race_name': race_name,
                 'race_category': race_category,
                 'uci_tour': uci_tour,
-                'stage_urls': stage_urls
+                'stage_urls': stage_urls,  # Keep for backward compatibility
+                'main_stage_urls': main_stage_urls,
+                'classification_urls': classification_urls
             }
             
             # Enhance with historical context if applicable
@@ -816,6 +841,86 @@ class AsyncCyclingDataScraper:
                 context={'stage_url': stage_url}
             )
             return None
+    
+    async def process_classification_urls(self, race_id: int, classification_urls: list) -> Dict[str, int]:
+        """Process classification URLs and save to classifications table
+        
+        Args:
+            race_id: ID of the race these classifications belong to
+            classification_urls: List of classification URLs to process
+            
+        Returns:
+            Dict with success/failed counts
+        """
+        results = {'success': 0, 'failed': 0}
+        
+        for classification_url in classification_urls:
+            try:
+                # Get classification info using existing get_stage_info method
+                # This method already handles classification URL detection
+                classification_info = await self.get_stage_info(classification_url)
+                
+                if not classification_info:
+                    results['failed'] += 1
+                    continue
+                
+                # Extract classification type from URL
+                classification_type = 'gc'  # default
+                if classification_url.endswith('/points') or '-points' in classification_url:
+                    classification_type = 'points'
+                elif classification_url.endswith('/kom') or '-kom' in classification_url:
+                    classification_type = 'kom'
+                elif classification_url.endswith('/youth') or '-youth' in classification_url:
+                    classification_type = 'youth'
+                
+                # Extract stage number if this is a stage-specific classification
+                stage_number = None
+                if '/stage-' in classification_url:
+                    try:
+                        stage_part = classification_url.split('/stage-')[1]
+                        stage_number = int(stage_part.split('-')[0])
+                    except (ValueError, IndexError):
+                        pass
+                
+                # Save classification data to database
+                await self.save_classification_data(
+                    race_id=race_id,
+                    classification_type=classification_type,
+                    stage_number=stage_number,
+                    classification_url=classification_url,
+                    results=classification_info.get('results', [])
+                )
+                
+                results['success'] += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to process classification URL {classification_url}: {e}")
+                results['failed'] += 1
+        
+        return results
+    
+    async def save_classification_data(self, race_id: int, classification_type: str, 
+                                     stage_number: Optional[int], classification_url: str, 
+                                     results: list):
+        """Save classification data to the classifications table"""
+        async with aiosqlite.connect(self.config.database_path) as db:
+            for result in results:
+                await db.execute('''
+                    INSERT OR REPLACE INTO classifications (
+                        race_id, classification_type, stage_number, classification_url,
+                        rider_name, rider_url, team_name, team_url, rank, time_gap, 
+                        points_total, uci_points, pcs_points, age, specialty, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    race_id, classification_type, stage_number, classification_url,
+                    result.get('rider_name'), result.get('rider_url'), 
+                    result.get('team'), result.get('team_url'),
+                    result.get('position'), result.get('time'), 
+                    result.get('points'), result.get('uci_points'), 
+                    result.get('pcs_points'), result.get('age'),
+                    result.get('specialty'), result.get('status')
+                ))
+            await db.commit()
     
     async def get_gc_info(self, gc_url: str) -> Optional[Dict[str, Any]]:
         """Get General Classification information and results"""
@@ -1449,10 +1554,13 @@ class AsyncCyclingDataScraper:
                 if not race_id:
                     continue
                 
-                logger.info(f"Processing race: {race_info['race_name']} ({len(race_info['stage_urls'])} stages)")
+                main_stages = race_info.get('main_stage_urls', race_info['stage_urls'])
+                classification_urls = race_info.get('classification_urls', [])
                 
-                # Process stages for this race
-                stage_tasks = [self.get_stage_info(stage_url) for stage_url in race_info['stage_urls']]
+                logger.info(f"Processing race: {race_info['race_name']} ({len(main_stages)} main stages, {len(classification_urls)} classifications)")
+                
+                # Process main stages for this race
+                stage_tasks = [self.get_stage_info(stage_url) for stage_url in main_stages]
                 stage_infos = await asyncio.gather(*stage_tasks)
                 
                 for stage_info in stage_infos:
@@ -1461,6 +1569,11 @@ class AsyncCyclingDataScraper:
                         if stage_id:
                             await self.save_results_data(stage_id, stage_info)
                             total_stages += 1
+                
+                # Process classifications separately
+                if classification_urls:
+                    classification_results = await self.process_classification_urls(race_id, classification_urls)
+                    logger.info(f"Classifications: {classification_results['success']} success, {classification_results['failed']} failed")
                 
                 # Add small delay between races
                 await asyncio.sleep(0.5)
@@ -1564,10 +1677,13 @@ class AsyncCyclingDataScraper:
                             await self.progress_tracker.mark_race_failed(race_url, "Failed to save race data")
                         continue
                     
-                    logger.info(f"Processing race: {race_info['race_name']} ({len(race_info['stage_urls'])} stages)")
+                    main_stages = race_info.get('main_stage_urls', race_info['stage_urls'])
+                    classification_urls = race_info.get('classification_urls', [])
                     
-                    # Process stages for this race
-                    stage_tasks = [self.get_stage_info(stage_url) for stage_url in race_info['stage_urls']]
+                    logger.info(f"Processing race: {race_info['race_name']} ({len(main_stages)} main stages, {len(classification_urls)} classifications)")
+                    
+                    # Process main stages for this race
+                    stage_tasks = [self.get_stage_info(stage_url) for stage_url in main_stages]
                     stage_infos = await asyncio.gather(*stage_tasks)
                     
                     race_stages = 0
@@ -1581,6 +1697,11 @@ class AsyncCyclingDataScraper:
                                 race_stages += 1
                                 race_results += len(stage_info.get('results', []))
                                 total_stages += 1
+                    
+                    # Process classifications separately
+                    if classification_urls:
+                        classification_results = await self.process_classification_urls(race_id, classification_urls)
+                        logger.info(f"Classifications: {classification_results['success']} success, {classification_results['failed']} failed")
                     
                     # Mark race as completed
                     if self.progress_tracker:

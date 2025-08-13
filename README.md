@@ -20,6 +20,8 @@ python src/update_riders.py
 
 ## Database Schema
 
+**Main database location**: `data/cycling_data.db`
+
 **races**: race_name, race_url, date, distance, profile_score, departure, arrival  
 **stages**: race_id, stage_url, distance, stage_type, date, won_how, avg_speed_winner  
 **results**: stage_id, rider_name, team, position, time, uci_points, pcs_points, age  
@@ -40,7 +42,7 @@ python src/update_riders.py
 
 ## Configuration
 
-Default settings: 50 concurrent requests, 0.1s delay, 3 retries, SQLite database.  
+Default settings: 30 concurrent requests, 0.1s delay, 3 retries, SQLite database at `data/cycling_data.db`.  
 Adjust: `python src/main.py YEAR --max-concurrent 10 --request-delay 0.2`
 
 ## Core Files

@@ -159,9 +159,9 @@ async def main():
     """Main entry point"""
     args = parse_args()
     
-    # Create necessary directories
-    Path('data').mkdir(exist_ok=True)
-    Path('data/backups').mkdir(exist_ok=True)
+    # Create necessary directories (relative to project root)
+    Path('../data').mkdir(exist_ok=True)
+    Path('../data/backups').mkdir(exist_ok=True)
     Path('logs').mkdir(exist_ok=True)
     Path('reports').mkdir(exist_ok=True)
     
