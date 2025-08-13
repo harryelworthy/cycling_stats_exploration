@@ -35,10 +35,11 @@ python src/update_riders.py
 ## Commands
 
 **Scrape specific year**: `python src/main.py YEAR`  
+**Scrape with automatic rider updates**: `python src/main.py YEAR --overwrite-riders`  
 **Scrape with rider profiles**: `python src/main.py YEAR --enable-rider-scraping`  
+**Overwrite existing data**: `python src/main.py YEAR --overwrite-data`  
 **Test scraper accuracy**: `python tests/fixtures_test.py`  
-**Update riders only**: `python src/update_riders.py --all-missing`  
-**Check status**: `python src/scraper_cli.py status`
+**Update riders only**: `python src/update_riders.py --all-missing`
 
 ## Configuration
 
@@ -53,32 +54,13 @@ Adjust: `python src/main.py YEAR --max-concurrent 10 --request-delay 0.2`
 - `src/progress_tracker.py` - Progress management
 - `tests/fixtures_test.py` - Accuracy testing
 
-## Current Status
+## Features
 
-### Scraper Accuracy: **95.7%** 🚀  
-*Approaching 100% - up from 36.1% initial accuracy*
-
-**Recent Achievements:**
-- ✅ **Race metadata extraction**: Now extracts race_name, race_url, race_type, winner  
-- ✅ **Demographic data**: Age, specialty, bib number extraction working  
-- ✅ **Time formatting**: Proper time parsing (e.g., "5:25:58")  
-- ✅ **Rider name formatting**: Fixed parsing ("Mathieu van der Poel")  
-- ✅ **GC/Classification URLs**: Systematic discovery of GC, points, KOM, youth classifications  
-- ✅ **Database normalization**: Separated results vs classifications data  
-- ✅ **GC table selection**: Improved parsing to get correct GC winners vs stage winners
-- ✅ **Jersey leaders**: Extract gc_leader, points_leader, youth_leader for stage races
-- ✅ **Jersey extraction**: Identify yellow jersey holders in GC results
-
-**Individual Fixture Performance:**
-- Paris-Roubaix 2024: **100.0%** accuracy ✅
-- Amstel Gold Race 2015: **100.0%** accuracy ✅
-- Tour de France 2016 Stage 14: **100.0%** accuracy ✅
-- Milano-Sanremo 1985: **100.0%** accuracy ✅
-- Giro d'Italia 2013 GC: **95.0%** accuracy
-- Paris-Roubaix 1905: **90.9%** accuracy
-- Tour de France 1986 GC: **84.6%** accuracy
-- Tour de France 1905 GC: **81.2%** accuracy
-
-### Remaining Minor Issues  
-- Missing `time_gap` for some GC results
-- Missing `point_classification` arrays for GC pages
+- **High-performance async scraping** with configurable concurrency controls
+- **Comprehensive data extraction**: races, stages, results, classifications, rider profiles  
+- **Automatic rider profile updates** after scraping race data
+- **Progress tracking and resumable sessions** for large multi-year scrapes
+- **Database integrity** with proper foreign key relationships and data validation
+- **Flexible overwrite options** for data updates and corrections
+- **Historical race support** back to early 1900s
+- **Detailed test coverage** with accuracy validation against known fixtures

@@ -89,6 +89,10 @@ class AsyncCyclingDataScraper:
         self.checkpoint_interval = 300  # 5 minutes
         self.last_checkpoint = time.time()
         
+        # Auto rider scraping
+        self._auto_scrape_riders = False
+        self._overwrite_riders = False
+        
         # Headers to mimic a real browser
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -97,6 +101,45 @@ class AsyncCyclingDataScraper:
             'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
         }
+    
+    def enable_auto_rider_scraping(self, overwrite_riders: bool = False):
+        """Enable automatic rider scraping after year completion"""
+        self._auto_scrape_riders = True
+        self._overwrite_riders = overwrite_riders
+    
+    async def _scrape_all_riders_for_year(self, year: int) -> Dict[str, int]:
+        """Scrape ALL riders for a specific year (including existing ones when overwrite is enabled)"""
+        if not self.rider_scraper:
+            logger.error("🚫 Rider scraper not initialized")
+            return {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        # Get ALL riders for this year, not just missing ones
+        async with aiosqlite.connect(self.config.database_path) as db:
+            query = '''
+                SELECT DISTINCT res.rider_name, res.rider_url
+                FROM results res
+                JOIN stages s ON res.stage_id = s.id
+                JOIN races r ON s.race_id = r.id
+                WHERE res.rider_url IS NOT NULL 
+                AND res.rider_url != ''
+                AND r.year = ?
+                ORDER BY res.rider_name
+            '''
+            cursor = await db.execute(query, (year,))
+            rows = await cursor.fetchall()
+            
+            all_riders = [{'rider_name': row[0], 'rider_url': row[1]} for row in rows]
+        
+        if not all_riders:
+            logger.info(f"No riders found for year {year}")
+            return {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        logger.info(f"Found {len(all_riders)} riders for year {year} (overwrite mode)")
+        
+        # Use conservative concurrency for rider scraping
+        max_concurrent = min(5, self.config.max_concurrent_requests // 10)
+        
+        return await self.rider_scraper.scrape_riders_batch(all_riders, max_concurrent)
     
     async def __aenter__(self):
         """Async context manager entry"""
@@ -904,15 +947,26 @@ class AsyncCyclingDataScraper:
                                      results: list):
         """Save classification data to the classifications table"""
         async with aiosqlite.connect(self.config.database_path) as db:
+            # Get stage_id if stage_number is provided
+            stage_id = None
+            if stage_number is not None:
+                cursor = await db.execute('''
+                    SELECT id FROM stages 
+                    WHERE race_id = ? AND stage_number = ?
+                ''', (race_id, stage_number))
+                row = await cursor.fetchone()
+                if row:
+                    stage_id = row[0]
+            
             for result in results:
                 await db.execute('''
                     INSERT OR REPLACE INTO classifications (
-                        race_id, classification_type, stage_number, classification_url,
+                        race_id, stage_id, classification_type, stage_number, classification_url,
                         rider_name, rider_url, team_name, team_url, rank, time_gap, 
                         points_total, uci_points, pcs_points, age, specialty, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    race_id, classification_type, stage_number, classification_url,
+                    race_id, stage_id, classification_type, stage_number, classification_url,
                     result.get('rider_name'), result.get('rider_url'), 
                     result.get('team'), result.get('team_url'),
                     result.get('position'), result.get('time'), 
@@ -1613,6 +1667,20 @@ class AsyncCyclingDataScraper:
                     logger.info(f"📊 Progress Update:\n{report}")
                 
                 await self.scrape_year_with_progress(year)
+                
+                # Auto-scrape riders for this year if enabled
+                if hasattr(self, '_auto_scrape_riders') and self._auto_scrape_riders:
+                    logger.info(f"🏃 Auto-scraping riders for year {year}")
+                    try:
+                        if self._overwrite_riders:
+                            # Re-scrape ALL riders for this year
+                            rider_results = await self._scrape_all_riders_for_year(year)
+                        else:
+                            # Only scrape missing riders
+                            rider_results = await self.scrape_riders_for_years([year], enable_rider_scraping=True)
+                        logger.info(f"   ✅ Riders: {rider_results['success']} success, {rider_results['failed']} failed, {rider_results['skipped']} skipped")
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Rider scraping failed for year {year}: {e}")
                 
                 # Mark year as completed
                 if self.progress_tracker:

@@ -152,6 +152,12 @@ def parse_args():
         help='Allow overwriting existing result data only'
     )
     
+    parser.add_argument(
+        '--overwrite-riders',
+        action='store_true',
+        help='Re-pull ALL riders present in the specified years, not just missing ones'
+    )
+    
     return parser.parse_args()
 
 
@@ -282,11 +288,15 @@ async def main():
                 scraper.progress_tracker = progress_tracker
                 scraper.checkpoint_interval = getattr(args, 'checkpoint_interval', 300)
                 
+                # Enable auto rider scraping if either flag is set
+                if args.enable_rider_scraping or args.overwrite_riders:
+                    scraper.enable_auto_rider_scraping(overwrite_riders=args.overwrite_riders)
+                
                 if args.enable_rider_scraping:
                     # Scrape races and then riders
                     await scraper.scrape_years_with_riders(remaining_years, enable_rider_scraping=True)
                 else:
-                    # Scrape only races
+                    # Scrape only races (but with auto rider scraping if enabled)
                     await scraper.scrape_years_with_progress(remaining_years)
             
             logger.info("🎉 Scraping completed successfully!")
