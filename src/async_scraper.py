@@ -37,6 +37,32 @@ class HistoricalDataHandler:
             return {'min_races_expected': 8, 'expect_team_data': True, 'expect_uci_points': False}
         else:
             return {'min_races_expected': 15, 'expect_team_data': True, 'expect_uci_points': True}
+    
+    @staticmethod
+    def enhance_historical_race_info(year: int, race_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhance race info with historical context and adjustments"""
+        if not race_info:
+            return race_info
+        
+        # Add historical context
+        race_info['historical_year'] = year
+        race_info['is_historical'] = year < 1980
+        
+        # Adjust expectations for very early years
+        if year < 1920:
+            # Very early cycling, limited data expected
+            race_info['data_quality_note'] = f"Limited data available for {year} - early cycling era"
+            race_info['expect_full_results'] = False
+        elif year < 1950:
+            # Pre-modern era, some missing data is normal
+            race_info['data_quality_note'] = f"Some data may be missing for {year} - pre-modern era"
+            race_info['expect_full_results'] = True
+        elif year < 1980:
+            # Modern era but before UCI points
+            race_info['data_quality_note'] = f"UCI points not available for {year}"
+            race_info['expect_full_results'] = True
+        
+        return race_info
 
 # Global instances
 enhanced_logger = SimpleErrorLogger()
@@ -949,11 +975,22 @@ class AsyncCyclingDataScraper:
         async with aiosqlite.connect(self.config.database_path) as db:
             # Get stage_id if stage_number is provided
             stage_id = None
-            if stage_number is not None:
+            if stage_number is not None and classification_url:
+                # Construct the expected stage URL pattern from the classification URL
+                # e.g., "race/tour-de-france/1903/stage-1-gc" -> "race/tour-de-france/1903/stage-1"
+                if '/stage-' in classification_url and '-gc' in classification_url:
+                    # For stage-specific classifications, extract the base stage URL
+                    stage_url_pattern = classification_url.replace('-gc', '').replace('-points', '').replace('-kom', '').replace('-youth', '')
+                else:
+                    # For race-level classifications, construct stage URL from race base
+                    # e.g., "race/tour-de-france/1903/gc" -> "race/tour-de-france/1903/stage-1"
+                    base_url = '/'.join(classification_url.split('/')[:-1])  # Remove the classification type
+                    stage_url_pattern = f"{base_url}/stage-{stage_number}"
+                
                 cursor = await db.execute('''
                     SELECT id FROM stages 
-                    WHERE race_id = ? AND stage_number = ?
-                ''', (race_id, stage_number))
+                    WHERE race_id = ? AND stage_url = ?
+                ''', (race_id, stage_url_pattern))
                 row = await cursor.fetchone()
                 if row:
                     stage_id = row[0]
