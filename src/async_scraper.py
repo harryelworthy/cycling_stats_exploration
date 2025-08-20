@@ -11,6 +11,9 @@ import ast
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import time
+import gc
+import psutil
+import os
 from contextlib import asynccontextmanager
 
 # Import rider scraper
@@ -119,6 +122,10 @@ class AsyncCyclingDataScraper:
         self._auto_scrape_riders = False
         self._overwrite_riders = False
         
+        # Output control
+        self.quiet_mode = False
+        self.no_reports = False
+        
         # Headers to mimic a real browser
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -132,6 +139,28 @@ class AsyncCyclingDataScraper:
         """Enable automatic rider scraping after year completion"""
         self._auto_scrape_riders = True
         self._overwrite_riders = overwrite_riders
+    
+    def _check_memory_usage(self) -> dict:
+        """Check current memory usage and trigger cleanup if needed"""
+        try:
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+            
+            # If memory usage exceeds 1GB, trigger garbage collection
+            if memory_mb > 1024:
+                if not self.quiet_mode:
+                    logger.warning(f"🧠 High memory usage: {memory_mb:.1f}MB - triggering cleanup")
+                gc.collect()
+                
+            return {
+                'memory_mb': memory_mb,
+                'memory_percent': process.memory_percent()
+            }
+        except Exception as e:
+            if not self.quiet_mode:
+                logger.debug(f"Could not check memory usage: {e}")
+            return {'memory_mb': 0, 'memory_percent': 0}
     
     async def _scrape_all_riders_for_year(self, year: int) -> Dict[str, int]:
         """Scrape ALL riders for a specific year (including existing ones when overwrite is enabled)"""
@@ -357,7 +386,13 @@ class AsyncCyclingDataScraper:
                     async with self.session.get(url) as response:
                         if response.status == 200:
                             self.stats.successful_requests += 1
-                            return await response.text()
+                            content = await response.text()
+                            
+                            # Trigger memory check for large responses  
+                            if len(content) > 500000:  # 500KB
+                                self._check_memory_usage()
+                                
+                            return content
                         else:
                             logger.warning(f"HTTP {response.status} for {url}")
                             
@@ -1696,14 +1731,19 @@ class AsyncCyclingDataScraper:
                     logger.info(f"⏭️  Skipping year {year} - already completed")
                     continue
                 
-                logger.info(f"🚀 Processing year {year} ({i+1}/{len(years)})")
+                if not self.quiet_mode:
+                    logger.info(f"🚀 Processing year {year} ({i+1}/{len(years)})")
                 
-                # Show progress report periodically
-                if self.progress_tracker and i > 0:
+                # Show progress report periodically (only every 5 years and if not suppressed)
+                if (self.progress_tracker and i > 0 and i % 5 == 0 and 
+                    not self.no_reports and not self.quiet_mode):
                     report = await self.progress_tracker.get_status_report(years)
                     logger.info(f"📊 Progress Update:\n{report}")
                 
                 await self.scrape_year_with_progress(year)
+                
+                # Check memory usage after each year
+                self._check_memory_usage()
                 
                 # Auto-scrape riders for this year if enabled
                 if hasattr(self, '_auto_scrape_riders') and self._auto_scrape_riders:
@@ -1877,10 +1917,11 @@ class AsyncCyclingDataScraper:
             logger.info("🔄 Starting rider profile collection phase...")
             rider_results = await self.scrape_riders_for_years(years, enable_rider_scraping)
             
-            logger.info(f"📊 Final rider scraping results:")
-            logger.info(f"   ✅ Riders processed: {rider_results['success']}")
-            logger.info(f"   ❌ Failed: {rider_results['failed']}")
-            logger.info(f"   ⏭️  Skipped: {rider_results['skipped']}")
+            if not self.quiet_mode:
+                logger.info(f"📊 Final rider scraping results:")
+                logger.info(f"   ✅ Riders processed: {rider_results['success']}")
+                logger.info(f"   ❌ Failed: {rider_results['failed']}")
+                logger.info(f"   ⏭️  Skipped: {rider_results['skipped']}")
         else:
             logger.info("⏭️  Skipping rider profile collection")
         

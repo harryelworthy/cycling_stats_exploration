@@ -13,16 +13,25 @@ from typing import List
 from async_scraper import AsyncCyclingDataScraper, ScrapingConfig
 from progress_tracker import progress_tracker
 
-def setup_logging(verbose: bool = False):
+def setup_logging(verbose: bool = False, quiet: bool = False):
     """Setup logging configuration"""
-    level = logging.DEBUG if verbose else logging.INFO
+    if quiet:
+        level = logging.ERROR  # Only show errors in quiet mode
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+        
+    handlers = [logging.FileHandler('logs/scraper.log')]
+    
+    # Only add console handler if not in quiet mode
+    if not quiet:
+        handlers.append(logging.StreamHandler())
+    
     logging.basicConfig(
         level=level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('logs/scraper.log')
-        ]
+        handlers=handlers
     )
 
 def parse_args():
@@ -133,6 +142,24 @@ def parse_args():
         help='Database backup interval in seconds (default: 300 = 5 minutes)'
     )
     
+    parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help='Minimize output for automated tools like Claude Code'
+    )
+    
+    parser.add_argument(
+        '--no-reports',
+        action='store_true',
+        help='Disable progress reports to reduce memory usage'
+    )
+    
+    parser.add_argument(
+        '--claude-mode',
+        action='store_true',
+        help='Claude Code compatibility mode (combines --quiet, --no-reports, minimal output)'
+    )
+    
     # Overwrite control options
     parser.add_argument(
         '--overwrite-data',
@@ -171,19 +198,28 @@ async def main():
     Path('logs').mkdir(exist_ok=True)
     Path('reports').mkdir(exist_ok=True)
     
+    # Handle Claude mode flag
+    if args.claude_mode:
+        args.quiet = True
+        args.no_reports = True
+        # Reduce concurrent requests for better memory management
+        args.max_concurrent = min(args.max_concurrent, 10)
+    
     # Setup logging
-    setup_logging(args.verbose)
+    setup_logging(args.verbose, args.quiet)
     logger = logging.getLogger(__name__)
     
     # Handle special commands first
     if args.status:
         report = await progress_tracker.get_status_report(args.years)
-        print(report)
+        if not args.quiet:
+            print(report)
         return
     
     if args.reset_session:
         await progress_tracker.reset_session()
-        print("✅ Session reset completed")
+        if not args.quiet:
+            print("✅ Session reset completed")
         return
     
     # Parse and validate years (support ranges like 1903-2025)
@@ -246,8 +282,9 @@ async def main():
     
     if not remaining_years:
         logger.info("✅ All specified years have already been completed!")
-        report = await progress_tracker.get_status_report(args.years)
-        print(report)
+        if not args.no_reports and not args.quiet:
+            report = await progress_tracker.get_status_report(args.years)
+            print(report)
         return
     
     logger.info(f"🔄 Years to process: {remaining_years}")
@@ -287,6 +324,8 @@ async def main():
                 # Set up progress tracking
                 scraper.progress_tracker = progress_tracker
                 scraper.checkpoint_interval = getattr(args, 'checkpoint_interval', 300)
+                scraper.quiet_mode = args.quiet
+                scraper.no_reports = args.no_reports
                 
                 # Enable auto rider scraping if either flag is set
                 if args.enable_rider_scraping or args.overwrite_riders:
@@ -303,14 +342,15 @@ async def main():
             logger.info(f"📊 Data saved to: {args.database}")
             
             # Final status report
-            if hasattr(progress_tracker, 'get_status_report'):
+            if hasattr(progress_tracker, 'get_status_report') and not args.no_reports and not args.quiet:
                 final_report = await progress_tracker.get_status_report(args.years)
                 print(final_report)
         except KeyboardInterrupt:
             logger.info("🛑 Scraping interrupted by user")
             logger.info("💾 Progress has been saved - use --resume to continue")
-            report = await progress_tracker.get_status_report(args.years)
-            print(report)
+            if not args.no_reports and not args.quiet:
+                report = await progress_tracker.get_status_report(args.years)
+                print(report)
             sys.exit(1)
         except Exception as e:
             logger.error(f"💥 Scraping failed: {e}")

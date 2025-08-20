@@ -253,40 +253,14 @@ class ProgressTracker:
         # Calculate progress percentage
         progress_pct = (completed_years / total_years * 100) if total_years > 0 else 0
         
-        # Estimate completion
-        estimated_completion = await self.estimate_completion(target_years)
-        eta_str = estimated_completion.strftime("%Y-%m-%d %H:%M:%S") if estimated_completion else "Unknown"
-        
-        # Performance metrics
-        races_per_hour = (self.current_progress.total_races_processed / elapsed.total_seconds() * 3600) if elapsed.total_seconds() > 0 else 0
-        
-        report = f"""
-🏁 SCRAPING PROGRESS REPORT
-{'=' * 50}
-📅 Session: {self.current_progress.session_id}
-⏱️  Started: {self.current_progress.start_time.strftime('%Y-%m-%d %H:%M:%S')}
-🕐 Elapsed: {str(elapsed).split('.')[0]}
-
-📊 YEAR PROGRESS:
-   ✅ Completed: {completed_years}/{total_years} years ({progress_pct:.1f}%)
-   ❌ Failed: {failed_years} years
-   🔄 Remaining: {total_years - completed_years - failed_years} years
-
-📈 DATA COLLECTED:
-   🏁 Races: {self.current_progress.total_races_processed:,}
-   🚴 Stages: {self.current_progress.total_stages_processed:,}
-   📋 Results: {self.current_progress.total_results_processed:,}
-
-⚡ PERFORMANCE:
-   🏃 Rate: {races_per_hour:.1f} races/hour
-   💾 Last backup: {self.current_progress.last_checkpoint.strftime('%H:%M:%S') if self.current_progress.last_checkpoint else 'Never'}
-
-🎯 PROJECTION:
-   🏆 ETA: {eta_str}
-"""
+        # Simplified report to reduce memory usage
+        report = f"""🏁 SCRAPING PROGRESS REPORT
+📊 Completed: {completed_years}/{total_years} years ({progress_pct:.1f}%)
+⏱️  Elapsed: {str(elapsed).split('.')[0]}
+📈 Data: {self.current_progress.total_races_processed:,} races, {self.current_progress.total_stages_processed:,} stages, {self.current_progress.total_results_processed:,} results"""
         
         if self.current_progress.failed_years:
-            report += f"\n⚠️  FAILED YEARS: {sorted(self.current_progress.failed_years)}"
+            report += f"\n⚠️  Failed years: {len(self.current_progress.failed_years)}"
         
         return report
     
