@@ -145,7 +145,7 @@ class AsyncCyclingDataScraper:
         self._overwrite_riders = overwrite_riders
     
     async def detect_available_classifications(self, race_url: str, year: int) -> set:
-        """Detect which classifications are available for a specific race-year combination
+        """Detect which classifications are available by parsing race page navigation tabs
         
         Args:
             race_url: The race URL (e.g., 'race/tour-de-france/2024')
@@ -161,48 +161,57 @@ class AsyncCyclingDataScraper:
             return self.classification_cache[cache_key]
         
         available_classifications = set()
-        all_possible_classifications = ['gc', 'points', 'kom', 'youth']
         
         if not self.quiet_mode:
-            logger.debug(f"🔍 Detecting available classifications for {race_url} ({year})")
+            logger.debug(f"🔍 Detecting available classifications from page tabs for {race_url} ({year})")
         
-        # Try race-level classifications first (more likely to exist and faster to check)
-        race_level_tasks = []
-        for classification_type in all_possible_classifications:
-            race_level_url = f"{race_url}/{classification_type}"
-            race_level_tasks.append(self._check_single_classification(race_level_url, classification_type))
-        
-        # Check race-level classifications concurrently
-        race_level_results = await asyncio.gather(*race_level_tasks, return_exceptions=True)
-        
-        for result in race_level_results:
-            if isinstance(result, str):  # Success returns classification type
-                available_classifications.add(result)
-                if not self.quiet_mode:
-                    logger.debug(f"✅ Found race-level {result} classification")
-        
-        # If race-level classifications found, assume they apply to all stages
-        if available_classifications:
-            if not self.quiet_mode:
-                logger.debug(f"Found {len(available_classifications)} race-level classifications")
-        else:
-            # Fallback: check stage-specific classifications if no race-level found
-            if not self.quiet_mode:
-                logger.debug(f"No race-level classifications found, checking stage-specific...")
+        try:
+            # Fetch the race page to parse classification tabs
+            html_content = await self.make_request(race_url)
             
-            first_stage_url = f"{race_url}/stage-1"
-            stage_tasks = []
-            for classification_type in all_possible_classifications:
-                classification_url = f"{first_stage_url}-{classification_type}"
-                stage_tasks.append(self._check_single_classification(classification_url, classification_type))
-            
-            stage_results = await asyncio.gather(*stage_tasks, return_exceptions=True)
-            
-            for result in stage_results:
-                if isinstance(result, str):  # Success returns classification type
-                    available_classifications.add(result)
+            if html_content:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Look for classification tabs in the race page
+                # Pattern: <ul class="tabs tabnav resultTabs"><li><a class="selectResultTab" href="...">GC</a></li>
+                classification_tabs = soup.find('ul', class_='tabs tabnav resultTabs')
+                
+                if classification_tabs:
+                    # Extract classification types from tab links
+                    for tab_link in classification_tabs.find_all('a', class_='selectResultTab'):
+                        href = tab_link.get('href', '')
+                        
+                        # Extract classification type from various URL patterns
+                        classification_type = self._extract_classification_from_url(href)
+                        if classification_type:
+                            available_classifications.add(classification_type)
+                            if not self.quiet_mode:
+                                logger.debug(f"✅ Found {classification_type} tab: {href}")
+                    
                     if not self.quiet_mode:
-                        logger.debug(f"✅ Found stage-specific {result} classification")
+                        logger.debug(f"Found classification tabs with {len(available_classifications)} types")
+                else:
+                    # No classification tabs found - likely a one-day race
+                    # Check dropdown options as fallback
+                    dropdown_options = soup.find_all('option')
+                    for option in dropdown_options:
+                        option_url = option.get('value', '')
+                        if '/gc/' in option_url or '/points/' in option_url or '/kom/' in option_url or '/youth/' in option_url:
+                            classification_type = self._extract_classification_from_url(option_url)
+                            if classification_type:
+                                available_classifications.add(classification_type)
+                                if not self.quiet_mode:
+                                    logger.debug(f"✅ Found {classification_type} from dropdown: {option_url}")
+                    
+                    if not available_classifications and not self.quiet_mode:
+                        logger.debug(f"No classification tabs or dropdown options found - likely one-day race")
+            else:
+                if not self.quiet_mode:
+                    logger.warning(f"Could not fetch race page for {race_url}")
+                
+        except Exception as e:
+            if not self.quiet_mode:
+                logger.error(f"Error parsing race page for classifications: {e}")
         
         # Cache the result
         self.classification_cache[cache_key] = available_classifications
@@ -212,34 +221,41 @@ class AsyncCyclingDataScraper:
         
         return available_classifications
     
-    async def _check_single_classification(self, classification_url: str, classification_type: str) -> Optional[str]:
-        """Check if a single classification URL exists and has data
+    def _extract_classification_from_url(self, url: str) -> Optional[str]:
+        """Extract classification type from various URL patterns
         
         Args:
-            classification_url: The full classification URL to check
-            classification_type: The type of classification ('gc', 'points', 'kom', 'youth')
+            url: URL that may contain classification information
             
         Returns:
-            classification_type if found, None if not found
+            Classification type ('gc', 'points', 'kom', 'youth') or None
         """
-        try:
-            html_content = await self.make_request(classification_url)
-            
-            if html_content:
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # Look for classification table or results
-                classification_table = soup.find('table', {'id': f'{classification_type}table'})
-                results_table = soup.find('table', class_='results')
-                
-                # If we find a table with data, this classification exists
-                if classification_table or (results_table and results_table.find('tbody')):
-                    return classification_type
-            
+        if not url:
             return None
             
-        except Exception as e:
-            return None
+        # Handle various URL patterns:
+        # - race/tour-de-france/2016/stage-14-gc
+        # - race/tour-de-france/2016/gc
+        # - race/tour-de-france/2016/gc/result/result
+        # - race/tour-de-france/2016/points/result/result
+        
+        # Stage-specific classifications: stage-X-gc, stage-X-points, etc.
+        stage_classification_match = re.search(r'/stage-\d+-(gc|points|kom|youth)', url)
+        if stage_classification_match:
+            return stage_classification_match.group(1)
+        
+        # Race-level classifications: /gc, /points, /kom, /youth (with or without /result/result)
+        race_classification_match = re.search(r'/(gc|points|kom|youth)(?:/|$)', url)
+        if race_classification_match:
+            return race_classification_match.group(1)
+        
+        # Handle team classifications - these are also valid classifications
+        if '/teams-gc' in url or re.search(r'/teams(?:/|$)', url):
+            return 'teams'
+        
+        return None
+    
+    # Note: _check_single_classification method removed - now using tab-based detection
     
     def update_classification_cache(self, race_url: str, year: int, found_classification: str):
         """Update classification cache when we discover a classification during processing
